@@ -18,17 +18,26 @@ static Preferences prefs;
 static int64_t offset = 0;
 static unsigned long wifiLostAt = 0;
 
-static void firstBoot() {
-  Serial.println("[boot] first boot, creating users");
-  for (const BootUser &b : BOOT) store::addUser(b.id, b.name);
+// Runs every boot: adds BOOT_USERS that don't exist yet and makes sure they
+// are in the boot shared account. So you can flash once with a placeholder,
+// learn your real chat id with /id, fix secrets.h and flash again.
+static void syncBootUsers() {
+  std::vector<int64_t> added;
+  for (const BootUser &b : BOOT)
+    if (!store::user(b.id)) {
+      store::addUser(b.id, b.name);
+      added.push_back(b.id);
+    }
   String err;
-  Account *shop = store::create(BOOT[0].id, BOOT_SHARED_KEY, BOOT_SHARED_NAME, false, err);
+  Account *shop = store::account(BOOT_SHARED_KEY);
+  if (!shop) shop = store::create(BOOT[0].id, BOOT_SHARED_KEY, BOOT_SHARED_NAME, false, err);
   if (!shop) {
     Serial.printf("[boot] shared account: %s\n", err.c_str());
     return;
   }
-  for (size_t i = 1; i < sizeof BOOT / sizeof BOOT[0]; i++) store::share(*shop, BOOT[i].id, err);
-  for (User &u : store::users()) u.cur = shop->id;
+  for (const BootUser &b : BOOT)
+    if (!shop->has(b.id)) store::share(*shop, b.id, err);
+  for (int64_t id : added) store::user(id)->cur = shop->id;  // new users start in the shop
   store::save();
 }
 
@@ -53,7 +62,7 @@ void setup() {
     delay(5000);
     ESP.restart();
   }
-  if (store::empty()) firstBoot();
+  syncBootUsers();
 
   prefs.begin("bot", false);
   offset = prefs.getLong64("offset", 0);

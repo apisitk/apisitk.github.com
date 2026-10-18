@@ -29,8 +29,9 @@ Telegram bot บันทึกรายรับรายจ่าย รัน
 
 PlatformIO ก็ใช้ได้: `pio run -t upload` (มี `platformio.ini` ให้แล้ว)
 
-> ถ้าแก้ `BOOT_USERS` หลังแฟลชไปแล้ว จะไม่มีผล (ใช้แค่ครั้งแรก) ให้ใช้ `/adduser` แทน
-> หรือล้างข้อมูลทั้งหมดด้วย Tools → Erase All Flash Before Sketch Upload
+> ทุกครั้งที่บูต คนใน `BOOT_USERS` ที่ยังไม่มีจะถูกเพิ่ม และถูกใส่กลับเข้าบัญชีแชร์ตั้งต้นเสมอ
+> (ข้อมูลเดิมไม่หาย) — แก้ chat id ใน secrets.h แล้วแฟลชใหม่ได้เลย
+> ล้างข้อมูลทั้งหมด: Tools → Erase All Flash Before Sketch Upload
 
 ## คำสั่ง
 

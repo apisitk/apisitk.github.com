@@ -44,6 +44,23 @@ static String txPath(const Account &a, const String &ym) {
   return "/tx/" + a.id + "/" + ym + ".jsonl";
 }
 
+// Cut to at most maxBytes without splitting a UTF-8 character (Thai is 3
+// bytes each); Telegram rejects messages containing broken UTF-8.
+static String utf8Cut(const String &s, size_t maxBytes) {
+  if (s.length() <= maxBytes) return s;
+  size_t n = maxBytes;
+  while (n > 0 && (s[n] & 0xC0) == 0x80) n--;
+  return s.substring(0, n);
+}
+
+// Replace dst with src. LittleFS rename overwrites atomically; fall back to
+// remove + rename if this FS layer refuses.
+static bool replaceFile(const String &src, const String &dst) {
+  if (LittleFS.rename(src, dst)) return true;
+  LittleFS.remove(dst);
+  return LittleFS.rename(src, dst);
+}
+
 static bool validKey(const String &k) {
   if (k.length() < 1 || k.length() > 16) return false;
   if (k[0] < 'a' || k[0] > 'z') return false;
@@ -99,6 +116,8 @@ static void eachTx(const String &path, F fn) {
 static void load() {
   gUsers.clear();
   gAccounts.clear();
+  // A power cut between writing db.tmp and renaming it leaves only db.tmp.
+  if (!LittleFS.exists(DB_PATH) && LittleFS.exists("/db.tmp")) LittleFS.rename("/db.tmp", DB_PATH);
   File f = LittleFS.open(DB_PATH, "r");
   if (!f) return;
   JsonDocument d;
@@ -126,8 +145,6 @@ bool begin() {
   return true;
 }
 
-bool empty() { return gUsers.empty(); }
-
 bool save() {
   JsonDocument d;
   JsonArray us = d["users"].to<JsonArray>();
@@ -153,8 +170,7 @@ bool save() {
   bool ok = serializeJson(d, f) > 0;
   f.close();
   if (!ok) return false;
-  LittleFS.remove(DB_PATH);
-  return LittleFS.rename("/db.tmp", DB_PATH);
+  return replaceFile("/db.tmp", DB_PATH);
 }
 
 std::deque<User> &users() { return gUsers; }
@@ -266,7 +282,7 @@ uint32_t addTx(const Account &a, int32_t amt, const String &note, int64_t by) {
   t.id = prefs.getUInt("txid", 0) + 1;
   t.ts = time(nullptr);
   t.amt = amt;
-  t.note = note.substring(0, TX_NOTE_MAX);
+  t.note = utf8Cut(note, TX_NOTE_MAX);
   t.by = by;
   File f = LittleFS.open(txPath(a, monthKey(t.ts)), "a", true);
   if (!f) return 0;
@@ -305,8 +321,7 @@ bool delTx(const Account &a, uint32_t id, Tx &removed) {
       return true;
     });
     out.close();
-    LittleFS.remove(path);
-    return LittleFS.rename(tmp, path);
+    return replaceFile(tmp, path);
   }
   return false;
 }

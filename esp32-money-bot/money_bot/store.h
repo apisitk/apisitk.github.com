@@ -46,7 +46,6 @@ struct Totals {
 namespace store {
 
 bool begin();  // mount FS and load db; false if FS failed
-bool empty();  // no users yet (first boot)
 bool save();
 
 std::deque<User> &users();

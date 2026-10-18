@@ -16,7 +16,7 @@ static const char *HELP =
     "  /today [บัญชี]    วันนี้\n"
     "  /month [บัญชี] [2026-10]  ทั้งเดือน\n"
     "  /sum             ทุกบัญชีเดือนนี้\n"
-    "  /last [10]       รายการล่าสุด\n"
+    "  /last [บัญชี] [10] รายการล่าสุด\n"
     "  /del 12  /undo   ลบรายการ\n"
     "\n"
     "บัญชี\n"
@@ -287,10 +287,14 @@ static String cmdSum(User &u) {
 }
 
 static String cmdLast(User &u, const std::vector<String> &tok) {
-  String err;
-  Account *a = pick(u, "", err);
+  int n = 10;
+  String key, err;
+  for (size_t i = 1; i < tok.size(); i++) {
+    if (isdigit((unsigned char)tok[i][0])) n = constrain(atoi(tok[i].c_str()), 1, 30);
+    else key = tok[i];
+  }
+  Account *a = pick(u, key, err);
   if (!a) return err;
-  int n = tok.size() > 1 ? constrain(atoi(tok[1].c_str()), 1, 30) : 10;
   std::vector<Tx> txs = store::recent(*a, n);
   if (txs.empty()) return "ยังไม่มีรายการใน " + a->name;
   String s = "🧾 ล่าสุด — " + a->name + "\n";
