@@ -6,7 +6,10 @@
 
 static const char *DB_PATH = "/db.json";
 
+static const char *PENDING_PATH = "/pending.txt";
+
 static std::deque<User> gUsers;
+static std::vector<String> gPending;
 static std::deque<Account> gAccounts;
 static Preferences prefs;
 
@@ -175,6 +178,35 @@ static void eachTx(const String &path, F fn) {
   f.close();
 }
 
+// ---------- backup queue ----------
+
+static void savePending() {
+  File f = LittleFS.open("/pending.tmp", "w");
+  if (!f) return;
+  for (const String &k : gPending) f.println(k);
+  f.close();
+  replaceFile("/pending.tmp", PENDING_PATH);
+}
+
+static void loadPending() {
+  gPending.clear();
+  File f = LittleFS.open(PENDING_PATH, "r");
+  if (!f) return;
+  while (f.available()) {
+    String k = f.readStringUntil('\n');
+    if (k.length()) gPending.push_back(k);
+  }
+  f.close();
+}
+
+static void markPending(const Account &a, const String &ym) {
+  String k = a.id + "/" + ym;
+  for (const String &p : gPending)
+    if (p == k) return;
+  gPending.push_back(k);
+  savePending();
+}
+
 // ---------- db.json ----------
 
 static void load() {
@@ -192,9 +224,9 @@ static void load() {
     return;
   }
   for (JsonObject u : d["users"].as<JsonArray>())
-    gUsers.push_back({u["id"].as<int64_t>(), u["n"] | "", u["c"] | ""});
+    gUsers.push_back({u["id"].as<int64_t>(), u["n"] | "", u["c"] | "", u["bu"] | "", u["bs"] | ""});
   for (JsonObject a : d["accs"].as<JsonArray>()) {
-    Account acc{a["id"] | "", a["k"] | "", a["n"] | "", a["p"] | false, {}, {}};
+    Account acc{a["id"] | "", a["k"] | "", a["n"] | "", a["p"] | false, {}, {}, a["bu"] | "", a["bs"] | ""};
     for (JsonVariant m : a["m"].as<JsonArray>()) acc.members.push_back(m.as<int64_t>());
     if (a["c"].isNull()) acc.cats = acc.priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS);  // db from before categories
     for (JsonObject c : a["c"].as<JsonArray>()) {
@@ -212,6 +244,7 @@ bool begin() {
   if (!LittleFS.begin(true)) return false;  // formats on first use
   prefs.begin("store", false);
   load();
+  loadPending();
   return true;
 }
 
@@ -223,6 +256,10 @@ bool save() {
     o["id"] = u.id;
     o["n"] = u.name;
     o["c"] = u.cur;
+    if (u.bkUrl.length()) {
+      o["bu"] = u.bkUrl;
+      o["bs"] = u.bkSecret;
+    }
   }
   JsonArray as = d["accs"].to<JsonArray>();
   for (const Account &a : gAccounts) {
@@ -231,6 +268,10 @@ bool save() {
     o["k"] = a.key;
     o["n"] = a.name;
     o["p"] = a.priv;
+    if (a.bkUrl.length()) {
+      o["bu"] = a.bkUrl;
+      o["bs"] = a.bkSecret;
+    }
     JsonArray m = o["m"].to<JsonArray>();
     for (int64_t id : a.members) m.add(id);
     JsonArray cs = o["c"].to<JsonArray>();
@@ -265,7 +306,7 @@ User *userByName(const String &name) {
 }
 
 User &addUser(int64_t id, const String &name) {
-  gUsers.push_back({id, name, ""});
+  gUsers.push_back({id, name, "", "", ""});
   String err;
   Account *me = resolve(id, "me");  // left over from an earlier /deluser
   if (!me) me = create(id, "me", "ส่วนตัว " + name, true, err);
@@ -330,7 +371,7 @@ Account *create(int64_t owner, const String &key, const String &name, bool priv,
     return nullptr;
   }
   gAccounts.push_back({id, k, name.length() ? name : k, priv, {owner},
-                       priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS)});
+                       priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS), "", ""});
   save();
   return &gAccounts.back();
 }
@@ -385,6 +426,7 @@ uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &
   f.close();
   if (!ok) return 0;
   prefs.putUInt("txid", t.id);
+  markPending(a, monthKey(t.ts));
   return t.id;
 }
 
@@ -418,7 +460,9 @@ static bool rewriteTx(const Account &a, uint32_t id, Tx &before, F fn) {
       return true;
     });
     out.close();
-    return replaceFile(tmp, path);
+    if (!replaceFile(tmp, path)) return false;
+    markPending(a, monthBack(now, back));
+    return true;
   }
   return false;
 }
@@ -508,6 +552,74 @@ Totals totals(const Account &a, time_t from, time_t to) {
   std::sort(tot.inCats.begin(), tot.inCats.end(), bigFirst);
   std::sort(tot.outCats.begin(), tot.outCats.end(), bigFirst);
   return tot;
+}
+
+const std::vector<String> &pending() { return gPending; }
+
+Account *unsynced(const String &key, size_t max, std::vector<Tx> &out) {
+  int slash = key.indexOf('/');
+  Account *a = account(key.substring(0, slash));
+  if (!a) return nullptr;
+  eachTx(txPath(*a, key.substring(slash + 1)), [&](Tx &t) {
+    if (!t.synced) out.push_back(t);
+    return out.size() < max;
+  });
+  return a;
+}
+
+bool markSynced(const String &key, const std::vector<uint32_t> &ids) {
+  int slash = key.indexOf('/');
+  Account *a = account(key.substring(0, slash));
+  if (!a) return false;
+  String path = txPath(*a, key.substring(slash + 1)), tmp = path + ".tmp";
+  File out = LittleFS.open(tmp, "w");
+  if (!out) return false;
+  bool left = false;
+  eachTx(path, [&](Tx &t) {
+    for (uint32_t id : ids)
+      if (t.id == id) t.synced = true;
+    left |= !t.synced;
+    out.println(toLine(t));
+    return true;
+  });
+  out.close();
+  if (!replaceFile(tmp, path)) return false;
+  if (!left) dropPending(key);
+  return true;
+}
+
+void dropPending(const String &key) {
+  for (size_t i = 0; i < gPending.size(); i++)
+    if (gPending[i] == key) {
+      gPending.erase(gPending.begin() + i);
+      savePending();
+      return;
+    }
+}
+
+void resync(const Account &a) {
+  File dir = LittleFS.open("/tx/" + a.id);
+  if (!dir) return;
+  std::vector<String> months;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    String p = f.path();
+    String name = p.substring(p.lastIndexOf('/') + 1);
+    f.close();
+    if (name.endsWith(".jsonl")) months.push_back(name.substring(0, name.length() - 6));
+  }
+  dir.close();
+  for (const String &ym : months) {
+    String path = txPath(a, ym), tmp = path + ".tmp";
+    File out = LittleFS.open(tmp, "w");
+    if (!out) continue;
+    eachTx(path, [&](Tx &t) {
+      t.synced = false;
+      out.println(toLine(t));
+      return true;
+    });
+    out.close();
+    if (replaceFile(tmp, path)) markPending(a, ym);
+  }
 }
 
 size_t fsUsed() { return LittleFS.usedBytes(); }

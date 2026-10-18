@@ -8,6 +8,7 @@
 //
 //   /db.json                      users + accounts
 //   /tx/<account id>/<YYYYMM>.jsonl  one transaction per line
+//   /pending.txt                   "<account id>/<YYYYMM>" files with unsynced rows
 //
 // Account visibility: a user sees an account only if they are in its members.
 // Private accounts have exactly one member and can never be shared.
@@ -17,6 +18,7 @@ struct User {
   int64_t id;
   String name;
   String cur;  // id of the account in use
+  String bkUrl, bkSecret;  // this user's Google Apps Script backup ("" = none)
 };
 
 struct Category {
@@ -31,6 +33,7 @@ struct Account {
   bool priv;
   std::vector<int64_t> members;
   std::vector<Category> cats;
+  String bkUrl, bkSecret;  // own backup sheet; "" = use a member's sheet
   bool has(int64_t uid) const;
   Category *cat(const String &name);  // case-insensitive
   String autoCat(const String &note) const;  // "" if nothing matches
@@ -86,6 +89,18 @@ bool editTx(const Account &a, uint32_t id, const Tx &changed, Tx &before);
 bool lastBy(const Account &a, int64_t by, Tx &out);  // newest live tx by user
 std::vector<Tx> recent(const Account &a, size_t n);  // newest first
 Totals totals(const Account &a, time_t from, time_t to);
+
+// ---------- backup queue ----------
+// Every add/edit/delete marks its month file pending. The backup module
+// sends the unsynced rows and marks them synced.
+const std::vector<String> &pending();
+// Up to `max` unsynced rows of a pending file; null account if it's gone.
+Account *unsynced(const String &key, size_t max, std::vector<Tx> &out);
+// Marks those rows synced; drops the file from the queue when none are left.
+bool markSynced(const String &key, const std::vector<uint32_t> &ids);
+void dropPending(const String &key);
+// Marks every row of the account unsynced, e.g. after a new backup target.
+void resync(const Account &a);
 
 size_t fsUsed();
 size_t fsTotal();

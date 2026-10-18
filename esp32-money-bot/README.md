@@ -12,7 +12,7 @@ Telegram bot บันทึกรายรับรายจ่าย รัน
 - [x] 2. บันทึก `+/-` ลงบอร์ด, สรุปยอด, ลบ/undo
 - [x] 3. หลายบัญชี + สิทธิ์ (shared / private)
 - [x] หมวดหมู่ (อัตโนมัติจากคำในโน้ต หรือ `@หมวด`), `/edit`, `/deluser`
-- [ ] 4. Backup ไป Google Sheet (Apps Script) + คิว sync
+- [x] 4. Backup ไป Google Sheet (Apps Script) + คิว sync — ตั้งค่าตาม [apps_script/README.md](apps_script/README.md)
 - [ ] 5. อ่านสลิปด้วย Typhoon (ผ่าน Apps Script) + ปุ่มยืนยัน + กันซ้ำ
 
 ## ติดตั้ง (Arduino IDE)
@@ -54,7 +54,11 @@ PlatformIO ก็ใช้ได้: `pio run -t upload` (มี `platformio.ini
 | `/share key คน` `/unshare key คน` `/members key` | จัดการสมาชิก (บัญชีแชร์เท่านั้น) |
 | `/adduser chat_id ชื่อ` | เพิ่มผู้ใช้ (ได้บัญชีส่วนตัว `me` อัตโนมัติ) |
 | `/deluser ชื่อ` | เอาผู้ใช้ออก (บัญชีส่วนตัวเขายังเก็บไว้ เพิ่มกลับจะได้คืน) |
-| `/status` | พื้นที่, RAM, WiFi |
+| `/backup` | ดูว่าแต่ละบัญชี backup ไปชีตไหน |
+| `/backup URL SECRET` | ชีตของคุณ (บัญชีส่วนตัว + บัญชีแชร์ที่ไม่มีชีตแยก) |
+| `/backup shop URL SECRET` | ชีตแยกของบัญชี — แชร์ชีตนี้ให้แฟนได้โดยไม่เห็นของส่วนตัว |
+| `/backup [shop] off` `/sync` | ปิดชีต / ส่งขึ้นชีตเดี๋ยวนี้ |
+| `/status` | พื้นที่, RAM, WiFi, สถานะ sync |
 
 ทุกคนมีบัญชีส่วนตัวชื่อ `me` ของตัวเอง — พิมพ์ `#me` เหมือนกันแต่ลงคนละบัญชี
 
@@ -69,7 +73,8 @@ PlatformIO ก็ใช้ได้: `pio run -t upload` (มี `platformio.ini
 ไล่สถานการณ์จริง: สิทธิ์บัญชีส่วนตัว, หมวด, แก้/ลบ, ภาษาไทยยาว, รีบูต
 
 ```
-ARDUINOJSON=~/Arduino/libraries/ArduinoJson/src ./test/run.sh
+ARDUINOJSON=~/Arduino/libraries/ArduinoJson/src ./test/run.sh   # บอท + backup (จำลอง Google)
+node test/code_gs_test.js                                        # Code.gs (จำลอง SpreadsheetApp)
 ```
 
 ## โครงสร้าง
@@ -80,6 +85,10 @@ money_bot/
   tg.*            Telegram API (getUpdates, sendMessage) ผ่าน HTTPS ตรวจ cert จริง
   store.*         users/accounts (/db.json) + รายการ (/tx/<acc>/<YYYYMM>.jsonl)
   bot.*           แปลคำสั่ง, เช็คสิทธิ์, หมวด, ตอบกลับ
+  backup.*        คิว sync → Google Sheet (retry/backoff, ส่งทีละ 40 แถว)
+  gas.*           HTTPS ไป Google Apps Script (ตาม redirect)
+apps_script/
+  Code.gs         วางใน Apps Script ของ Google Sheet (upsert ตาม id)
   config.h        ค่าตั้งที่ไม่ลับ
   ca_bundle.h     root CA (สร้างจาก tools/make_ca_bundle.py)
 ```

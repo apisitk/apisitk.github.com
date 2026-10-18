@@ -12,3 +12,10 @@
 #define KEEP_MONTHS    13        // how many months /del and /last search back
 #define TX_NOTE_MAX    80        // bytes of note kept per transaction
 #define WIFI_REBOOT_MS (5UL * 60 * 1000)  // reboot if WiFi is down this long
+
+#define GAS_TIMEOUT_MS      20000             // Apps Script can be slow to wake up
+#define BACKUP_BATCH        40                // rows per request
+#define BACKUP_MAX_ROUNDS   5                 // batches per file per sync, keeps the bot responsive
+#define BACKUP_IDLE_MS      (60UL * 1000)     // check the queue this often
+#define BACKUP_RETRY_MS     (60UL * 1000)     // first retry after a failure, doubles...
+#define BACKUP_RETRY_MAX_MS (30UL * 60 * 1000)  // ...up to this

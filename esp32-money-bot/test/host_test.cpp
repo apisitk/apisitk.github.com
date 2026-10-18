@@ -1,6 +1,9 @@
 // Runs the real bot/store code on a PC against a fake Telegram.
 // Build & run: ./run.sh
+#include "../money_bot/backup.h"
 #include "../money_bot/bot.h"
+#include "../money_bot/gas.h"
+#include <ArduinoJson.h>
 #include "../money_bot/store.h"
 #include <LittleFS.h>
 #include <WiFi.h>
@@ -24,6 +27,50 @@ bool send(int64_t chat, const String &text) {
   return true;
 }
 }  // namespace tg
+
+// Fake Apps Script web apps, keyed by URL. Mirrors Code.gs: checks the
+// secret, upserts rows by id per sheet, deletes rows marked del.
+struct FakeSheet {
+  std::string secret;
+  std::map<std::string, std::map<uint32_t, std::string>> tabs;  // tab -> id -> "amt|cat|note|by"
+  int calls = 0;
+};
+static std::map<std::string, FakeSheet> sheets;
+static bool googleDown = false;
+
+namespace gas {
+bool post(const String &url, const String &body, String &resp) {
+  if (googleDown || !sheets.count(url.s)) return false;
+  FakeSheet &sh = sheets[url.s];
+  sh.calls++;
+  JsonDocument req;
+  deserializeJson(req, body.s);
+  if (req["secret"] != sh.secret.c_str()) {
+    resp = "{\"ok\":false,\"error\":\"wrong secret\"}";
+    return true;
+  }
+  for (JsonObject r : req["rows"].as<JsonArray>()) {
+    auto &tab = sh.tabs[r["sheet"].as<std::string>()];
+    uint32_t id = r["id"];
+    if (r["del"] | false) tab.erase(id);
+    else
+      tab[id] = std::to_string(r["amt"].as<int>()) + "|" + r["cat"].as<std::string>() + "|" +
+                r["note"].as<std::string>() + "|" + r["by"].as<std::string>();
+  }
+  resp = "{\"ok\":true}";
+  return true;
+}
+}  // namespace gas
+
+static size_t rowsIn(const std::string &url) {
+  size_t n = 0;
+  for (auto &t : sheets[url].tabs) n += t.second.size();
+  return n;
+}
+static bool hasRow(const std::string &url, const std::string &tab, uint32_t id) {
+  auto &tabs = sheets[url].tabs;
+  return tabs.count(tab) && tabs[tab].count(id);
+}
 
 static const int64_t ME = 111, FAN = 222, STRANGER = 999;
 static int failures = 0;
@@ -192,10 +239,98 @@ int main() {
 
   // Survives a reboot (reload db from disk)
   store::begin();
+  shop = store::account("shop");  // old pointers die with the reload, like on a real reboot
   r = say(FAN, "/acc");
   expect(r, "เงินเก็บ", "accounts reloaded");
   r = say(ME, "/month");
   expect(r, "• บรรจุภัณฑ์ 50.00", "transactions reloaded");
+
+  // ---------------- Backup (step 4) ----------------
+  const std::string URL_ME = "https://script.google.com/macros/s/ME/exec";
+  const std::string URL_SHOP = "https://script.google.com/macros/s/SHOP/exec";
+  const std::string URL_FAN = "https://script.google.com/macros/s/FAN/exec";
+  sheets[URL_ME].secret = "s-me";
+  sheets[URL_SHOP].secret = "s-shop";
+  sheets[URL_FAN].secret = "s-fan";
+  auto check = [](bool ok, const char *what) {
+    if (!ok) { std::cout << "  ❌ FAIL: " << what << "\n"; failures++; }
+  };
+  String rep;
+
+  say(FAN, "-30 ข้าวมันไก่ #me");  // fan's private, before anyone has a sheet
+  r = say(ME, "/backup");
+  expect(r, "ยังไม่มีชีต", "no sheet yet");
+  backup::now(rep);
+  check(rowsIn(URL_ME) + rowsIn(URL_SHOP) + rowsIn(URL_FAN) == 0, "nothing sent without a sheet");
+  check(!store::pending().empty(), "rows wait on the board");
+
+  expect(say(ME, "/backup http://evil.com/x s"), "ต้องขึ้นต้นด้วย", "only script.google.com");
+  expect(say(ME, "/backup " + URL_ME + " nope"), "wrong secret", "bad secret rejected");
+  expect(say(ME, "/backup https://script.google.com/macros/s/NOPE/exec s"), "ติดต่อไม่ได้", "unreachable url");
+
+  r = say(ME, "/backup " + URL_ME + " s-me");
+  expect(r, "ตั้งชีตของคุณแล้ว", "personal sheet set");
+  backup::now(rep);
+  Account *myMe = store::resolve(ME, "me"), *fanMe = store::resolve(FAN, "me");
+  check(sheets[URL_ME].tabs.count("ส่วนตัว me (me)") == 1, "my private tab in my sheet");
+  check(sheets[URL_ME].tabs.count("ร้าน (shop)") == 1, "shop falls back to first member with a sheet");
+  size_t liveShop = store::recent(*shop, 1000).size();
+  check(sheets[URL_ME].tabs["ร้าน (shop)"].size() == liveShop, "all live shop rows sent, deleted ones not");
+  for (auto &t : sheets[URL_ME].tabs)
+    for (auto &row : t.second) check(row.second.find("ข้าวมันไก่") == std::string::npos, "fan's private NOT in my sheet");
+
+  r = say(FAN, "/backup");
+  expect(r, "ร้าน → ชีตของ me", "fan sees where shop goes");
+  expect(r, "ส่วนตัว fan → ยังไม่มีชีต", "fan's private waits for fan's own sheet");
+
+  r = say(ME, "/backup shop " + URL_SHOP + " s-shop");
+  expect(r, "ตั้งชีตบัญชี ร้าน", "per-account sheet set");
+  backup::now(rep);
+  check(sheets[URL_SHOP].tabs["ร้าน (shop)"].size() == liveShop, "shop resent to its own sheet");
+  check(sheets[URL_SHOP].tabs.count("ส่วนตัว me (me)") == 0, "my private not in the shop sheet");
+  expect(say(FAN, "/backup"), "ร้าน → ชีตของบัญชีนี้", "shop now has its own sheet");
+
+  r = say(FAN, "/backup " + URL_FAN + " s-fan");
+  backup::now(rep);
+  check(sheets[URL_FAN].tabs.count("ส่วนตัว fan (me)") == 1, "fan's private reaches fan's sheet");
+  check(sheets[URL_FAN].tabs.count("ร้าน (shop)") == 0, "shop does not go to fan's sheet");
+  check(store::pending().empty(), "queue empty after sync");
+
+  // Offline, then back: nothing lost, edits and deletes follow
+  googleDown = true;
+  say(ME, "-99 น้ำแข็ง");
+  Tx t99;
+  store::lastBy(*shop, ME, t99);
+  check(!backup::now(rep), "sync fails while offline");
+  expect(rep.s, "ส่งไม่สำเร็จ", "offline report");
+  expect(say(ME, "/status"), "sync ล่าสุดพลาด", "/status shows the failure");
+  store::begin();  // reboot while offline
+  shop = store::account("shop");
+  check(!store::pending().empty(), "queue survives reboot");
+  googleDown = false;
+  check(backup::now(rep), "sync ok after network is back");
+  check(hasRow(URL_SHOP, "ร้าน (shop)", t99.id), "offline row arrived");
+  say(ME, "/edit " + std::to_string(t99.id) + " -111 @ค่าน้ำไฟ");
+  backup::now(rep);
+  check(sheets[URL_SHOP].tabs["ร้าน (shop)"][t99.id].rfind("-11100|ค่าน้ำไฟ", 0) == 0, "edit reaches the sheet");
+  say(FAN, "/del " + std::to_string(t99.id));
+  backup::now(rep);
+  check(!hasRow(URL_SHOP, "ร้าน (shop)", t99.id), "delete reaches the sheet");
+  int callsBefore = sheets[URL_SHOP].calls;
+  backup::now(rep);
+  check(sheets[URL_SHOP].calls == callsBefore, "no requests when nothing changed");
+
+  // More than one batch
+  for (int i = 0; i < 95; i++) say(ME, "+1 ขาย" + std::to_string(i));
+  backup::now(rep);
+  check(store::pending().empty(), "95 rows in one /sync (3 batches)");
+  check(sheets[URL_SHOP].tabs["ร้าน (shop)"].size() == store::recent(*shop, 1000).size(), "sheet matches board");
+
+  r = say(ME, "/backup shop off");
+  expect(r, "ปิดชีตบัญชี ร้าน", "per-account off");
+  expect(say(ME, "/backup"), "ร้าน → ชีตของ me", "falls back to my sheet");
+  (void)myMe;
+  (void)fanMe;
 
   std::cout << "\n" << (failures ? "❌ " : "✅ ") << failures << " failure(s)\n";
   return failures != 0;

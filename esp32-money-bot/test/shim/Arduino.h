@@ -32,6 +32,9 @@ class String {
   String substring(unsigned a, unsigned b) const { return a < s.size() && b > a ? s.substr(a, b - a) : ""; }
   int indexOf(char c, unsigned from = 0) const { auto p = s.find(c, from); return p == std::string::npos ? -1 : (int)p; }
   int indexOf(const String &t, unsigned from = 0) const { auto p = s.find(t.s, from); return p == std::string::npos ? -1 : (int)p; }
+  int lastIndexOf(char c) const { auto p = s.rfind(c); return p == std::string::npos ? -1 : (int)p; }
+  bool startsWith(const String &p) const { return s.compare(0, p.s.size(), p.s) == 0; }
+  bool endsWith(const String &p) const { return s.size() >= p.s.size() && s.compare(s.size() - p.s.size(), p.s.size(), p.s) == 0; }
   void toLowerCase() { for (char &c : s) c = tolower((unsigned char)c); }
   bool equalsIgnoreCase(const String &o) const { return strcasecmp(s.c_str(), o.s.c_str()) == 0; }
   bool concat(const char *c) { s += c; return true; }
@@ -75,6 +78,8 @@ class Stream : public Print {
 struct SerialShim { template <typename... A> void printf(const char *f, A... a) { ::printf(f, a...); } void println(const char *s) { puts(s); } };
 extern SerialShim Serial;
 inline unsigned long millis() { return clock() / (CLOCKS_PER_SEC / 1000); }
+#include <algorithm>
+using std::min;
 template <typename T> T constrain(T v, T lo, T hi) { return v < lo ? lo : v > hi ? hi : v; }
 struct EspShim { unsigned getFreeHeap() { return 200000; } };
 extern EspShim ESP;

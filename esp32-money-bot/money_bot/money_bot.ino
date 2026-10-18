@@ -2,6 +2,7 @@
 // See ../README.md for setup.
 #include "config.h"
 #include "secrets.h"
+#include "backup.h"
 #include "bot.h"
 #include "store.h"
 #include "tg.h"
@@ -94,4 +95,5 @@ void loop() {
     prefs.putLong64("offset", offset);
     bot::handle(u);
   }
+  backup::loop();
 }

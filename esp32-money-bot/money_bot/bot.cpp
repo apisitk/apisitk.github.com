@@ -1,4 +1,5 @@
 #include "bot.h"
+#include "backup.h"
 #include "store.h"
 #include <WiFi.h>
 
@@ -31,6 +32,12 @@ static const char *HELP =
     "  /newpriv key ชื่อ   สร้างบัญชีส่วนตัว\n"
     "  /share key คน  /unshare key คน\n"
     "  /members key\n"
+    "\n"
+    "Backup (Google Sheet)\n"
+    "  /backup            ดูว่าบัญชีไหนไปชีตไหน\n"
+    "  /backup URL SECRET  ชีตของคุณ\n"
+    "  /backup shop URL SECRET  ชีตแยกของบัญชี\n"
+    "  /sync              ส่งขึ้นชีตเดี๋ยวนี้\n"
     "\n"
     "ผู้ใช้\n"
     "  /adduser chat_id ชื่อ  /deluser ชื่อ\n"
@@ -232,6 +239,7 @@ static String record(User &u, const std::vector<String> &tok) {
   uint32_t id = store::addTx(*a, e.amt, e.note, e.cat, u.id);
   if (!id) return "⚠️ บันทึกไม่สำเร็จ (พื้นที่เต็ม?) ดู /status";
 
+  backup::kick();
   String line = txLine(e.amt, e.note, e.cat, id);
   notifyOthers(*a, u.id, "บันทึก " + line);
   return "✅ " + line + "\n📁 " + a->name + (e.cat.length() ? "" : "\nใส่หมวดด้วย /edit " + String(id) + " @หมวด");
@@ -257,6 +265,7 @@ static String cmdEdit(User &u, const std::vector<String> &tok) {
 
   Tx before;
   if (!store::editTx(*a, id, changed, before)) return "⚠️ แก้ไม่สำเร็จ";
+  backup::kick();
   String line = txLine(changed.amt, changed.note, changed.cat, id);
   notifyOthers(*a, u.id, "แก้ " + line);
   return "✏️ " + line;
@@ -451,6 +460,7 @@ static String cmdLast(User &u, const std::vector<String> &tok) {
 static String removeTx(User &u, Account &a, uint32_t id) {
   Tx t;
   if (!store::delTx(a, id, t)) return "ไม่พบรายการ #" + String(id) + " ใน " + a.name;
+  backup::kick();
   String line = signedMoney(t.amt) + (t.note.length() ? " " + t.note : "") + " #" + String(id);
   notifyOthers(a, u.id, "ลบ " + line);
   return "🗑 ลบ " + line;
@@ -473,14 +483,66 @@ static String cmdUndo(User &u) {
   return removeTx(u, *a, t.id);
 }
 
+// /backup                       where each of my accounts is backed up
+// /backup URL SECRET             my own sheet (my private accounts + fallback)
+// /backup <key> URL SECRET       a sheet just for this account
+// /backup [<key>] off
+static String cmdBackup(User &u, const std::vector<String> &tok) {
+  Account *acc = nullptr;
+  size_t i = 1;
+  if (tok.size() > 1 && tok[1].indexOf("://") < 0 && !tok[1].equalsIgnoreCase("off")) {
+    acc = store::resolve(u.id, tok[1]);
+    if (!acc) return "ไม่พบบัญชี " + tok[1];
+    i = 2;
+  }
+  String &url = acc ? acc->bkUrl : u.bkUrl;
+  String &secret = acc ? acc->bkSecret : u.bkSecret;
+  String what = acc ? "บัญชี " + acc->name : String("ของคุณ");
+
+  if (tok.size() >= i + 2) {
+    String err;
+    if (!backup::ping(tok[i], tok[i + 1], err)) return "⚠️ ใช้ไม่ได้: " + err;
+    url = tok[i];
+    secret = tok[i + 1];
+    store::save();
+    // Push everything that now lands in this sheet, including rows that
+    // were synced somewhere else before; the sheet upserts by id.
+    for (Account *a : store::visible(u.id)) {
+      backup::Dest d;
+      if (backup::dest(*a, d) && d.url == url) store::resync(*a);
+    }
+    backup::kick();
+    return "✅ ตั้งชีต" + what + "แล้ว กำลังส่งข้อมูลขึ้นชีต\n🔐 ลบข้อความที่มี secret ทิ้งได้เลย";
+  }
+  if (tok.size() == i + 1 && tok[i].equalsIgnoreCase("off")) {
+    url = secret = "";
+    store::save();
+    return "⏹ ปิดชีต" + what + "แล้ว (ข้อมูลยังอยู่ในบอร์ด)";
+  }
+  if (acc) return "ใช้: /backup " + acc->key + " URL SECRET  หรือ  /backup " + acc->key + " off";
+
+  String s = String("☁️ ชีตของคุณ: ") + (u.bkUrl.length() ? "ตั้งแล้ว" : "ยังไม่ตั้ง") + "\n\n";
+  for (Account *a : store::visible(u.id)) {
+    backup::Dest d;
+    s += "📁 " + a->name + " → " + (backup::dest(*a, d) ? d.label : String("ยังไม่มีชีต (รอในบอร์ด)")) + "\n";
+  }
+  return s + "\nชีตของคุณ: /backup URL SECRET\nชีตแยกต่อบัญชี: /backup shop URL SECRET\nวิธีทำชีต: apps_script/README.md";
+}
+
+static String cmdSync() {
+  String report;
+  backup::now(report);
+  return report;
+}
+
 static String cmdStatus() {
-  char buf[200];
+  char buf[400];  // Thai text is 3 bytes per character
   snprintf(buf, sizeof buf,
-           "⚙️ สถานะ\nพื้นที่: %u / %u KB\nRAM ว่าง: %u KB\nWiFi: %d dBm\nเปิดมา: %lu นาที\nเวลา: %s",
+           "⚙️ สถานะ\nพื้นที่: %u / %u KB\nRAM ว่าง: %u KB\nWiFi: %d dBm\nเปิดมา: %lu นาที\nเวลา: %s\n",
            (unsigned)(store::fsUsed() / 1024), (unsigned)(store::fsTotal() / 1024),
            (unsigned)(ESP.getFreeHeap() / 1024), WiFi.RSSI(), millis() / 60000,
            timeReady() ? dateTime(time(nullptr)).c_str() : "ยังไม่ซิงค์");
-  return buf;
+  return buf + backup::status();
 }
 
 void handle(const tg::Update &up) {
@@ -531,6 +593,8 @@ void handle(const tg::Update &up) {
   else if (cmd == "/addcat") reply = cmdAddCat(*u, tok);
   else if (cmd == "/delcat") reply = cmdDelCat(*u, tok);
   else if (cmd == "/deluser") reply = cmdDelUser(*u, tok);
+  else if (cmd == "/backup") reply = cmdBackup(*u, tok);
+  else if (cmd == "/sync") reply = cmdSync();
   else if (cmd == "/status") reply = cmdStatus();
   else reply = "❓ ไม่เข้าใจ พิมพ์ /help";
 
