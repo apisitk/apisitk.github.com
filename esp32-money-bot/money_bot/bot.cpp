@@ -8,27 +8,33 @@ static const char *HELP =
     "📒 บอทบันทึกรายรับรายจ่าย\n"
     "\n"
     "บันทึก\n"
-    "  +500 ขายของ      รายรับ\n"
-    "  -120 ค่าน้ำแข็ง    รายจ่าย\n"
-    "  -80 กาแฟ #me     ระบุบัญชีในข้อความ\n"
+    "  +500 ขายของ        รายรับ\n"
+    "  -120 ค่าน้ำแข็ง      รายจ่าย (หมวดอัตโนมัติ)\n"
+    "  -80 กาแฟ @อาหาร #me  ระบุหมวด/บัญชีเอง\n"
+    "  /edit 12 -150 @หมวด  แก้รายการ\n"
+    "  /del 12  /undo     ลบรายการ\n"
     "\n"
     "ดูยอด\n"
-    "  /today [บัญชี]    วันนี้\n"
+    "  /today [บัญชี]      วันนี้\n"
     "  /month [บัญชี] [2026-10]  ทั้งเดือน\n"
-    "  /sum             ทุกบัญชีเดือนนี้\n"
-    "  /last [บัญชี] [10] รายการล่าสุด\n"
-    "  /del 12  /undo   ลบรายการ\n"
+    "  /sum               ทุกบัญชีเดือนนี้\n"
+    "  /last [บัญชี] [10]  รายการล่าสุด\n"
+    "\n"
+    "หมวด\n"
+    "  /cat [บัญชี]        ดูหมวดและคำค้น\n"
+    "  /addcat ชื่อ [คำค้น..] เพิ่มหมวด/คำค้น\n"
+    "  /delcat ชื่อ\n"
     "\n"
     "บัญชี\n"
-    "  /acc             บัญชีที่เห็นได้\n"
-    "  /use shop        เปลี่ยนบัญชีที่ใช้\n"
-    "  /newacc key ชื่อ  สร้างบัญชีแชร์\n"
-    "  /newpriv key ชื่อ สร้างบัญชีส่วนตัว\n"
+    "  /acc  /use shop    ดู/เปลี่ยนบัญชี\n"
+    "  /newacc key ชื่อ    สร้างบัญชีแชร์\n"
+    "  /newpriv key ชื่อ   สร้างบัญชีส่วนตัว\n"
     "  /share key คน  /unshare key คน\n"
     "  /members key\n"
     "\n"
-    "อื่นๆ\n"
-    "  /adduser chat_id ชื่อ  /id  /status";
+    "ผู้ใช้\n"
+    "  /adduser chat_id ชื่อ  /deluser ชื่อ\n"
+    "  /id  /status";
 
 // ---------- helpers ----------
 
@@ -125,9 +131,18 @@ static time_t startOfMonth(int year, int month) {  // month 1..12, may overflow
   return mktime(&lt);
 }
 
+static String catName(const String &c) { return c.length() ? c : "อื่นๆ"; }
+
+static String catLines(const std::vector<CatSum> &cats) {
+  String s;
+  for (const CatSum &c : cats) s += "  • " + catName(c.cat) + " " + money(c.amt) + "\n";
+  return s;
+}
+
 static String totalsText(const Totals &t) {
-  return "รับ  +" + money(t.in) + "\nจ่าย -" + money(t.out) + "\nคงเหลือ " + money(t.in - t.out) + "\n(" +
-         String(t.count) + " รายการ)";
+  String s = "รับ  +" + money(t.in) + "\n" + catLines(t.inCats);
+  s += "จ่าย -" + money(t.out) + "\n" + catLines(t.outCats);
+  return s + "คงเหลือ " + money(t.in - t.out) + "\n(" + String(t.count) + " รายการ)";
 }
 
 // Tell the other members of a shared account what happened.
@@ -149,41 +164,166 @@ static Account *pick(User &u, const String &key, String &reply) {
 
 // ---------- handlers ----------
 
-static String record(User &u, const std::vector<String> &tok) {
-  if (!timeReady()) return "⏳ ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วลองใหม่";
+// What a user typed for a transaction: "-120 ค่าน้ำแข็ง @วัตถุดิบ #shop".
+struct Entry {
+  bool hasAmt = false;
+  int32_t amt = 0;
+  String note, key, cat;  // key = account, cat = explicit category
+};
 
-  // "+500 note" or "+ 500 note"
-  String first = tok[0];
-  bool income = first[0] == '+';
-  String num = first.substring(1);
-  size_t rest = 1;
-  if (num.length() == 0 && tok.size() > 1) {
-    num = tok[1];
-    rest = 2;
+// Parses tok[i..]. The amount is optional here; callers decide if it's
+// required. Returns an error message, or "" on success.
+static String parseEntry(User &u, const std::vector<String> &tok, size_t i, Entry &e) {
+  if (i < tok.size() && (tok[i][0] == '+' || tok[i][0] == '-')) {
+    bool income = tok[i][0] == '+';
+    String num = tok[i].substring(1);
+    if (num.length() == 0 && i + 1 < tok.size()) num = tok[++i];  // "+ 500"
+    if (!parseAmount(num, e.amt)) return "❓ จำนวนเงินไม่ถูกต้อง ตัวอย่าง: -120 ค่าน้ำแข็ง";
+    if (!income) e.amt = -e.amt;
+    e.hasAmt = true;
+    i++;
   }
-  int32_t amt;
-  if (!parseAmount(num, amt)) return "❓ จำนวนเงินไม่ถูกต้อง ตัวอย่าง: -120 ค่าน้ำแข็ง";
-  if (!income) amt = -amt;
-
-  String key, note;
-  for (size_t i = rest; i < tok.size(); i++) {
-    if (tok[i][0] == '#' && tok[i].length() > 1) {
-      key = tok[i].substring(1);
+  for (; i < tok.size(); i++) {
+    const String &t = tok[i];
+    // "#shop" picks an account only if there is one; otherwise "#1" etc. stays in the note.
+    if (t[0] == '#' && t.length() > 1 && store::resolve(u.id, t.substring(1))) {
+      e.key = t.substring(1);
       continue;
     }
-    if (note.length()) note += ' ';
-    note += tok[i];
+    if (t[0] == '@' && t.length() > 1) {
+      e.cat = t.substring(1);
+      continue;
+    }
+    if (e.note.length()) e.note += ' ';
+    e.note += t;
   }
+  return "";
+}
 
-  String err;
-  Account *a = pick(u, key, err);
+// Exact category name for an explicit "@cat", or an error message.
+static bool checkCat(Account &a, String &cat, String &err) {
+  Category *c = a.cat(cat);
+  if (!c) {
+    err = "❓ ไม่มีหมวด " + cat + " ใน " + a.name + "\nดู /cat หรือเพิ่มด้วย /addcat " + cat;
+    return false;
+  }
+  cat = c->name;
+  return true;
+}
+
+static String txLine(int32_t amt, const String &note, const String &cat, uint32_t id) {
+  return signedMoney(amt) + (note.length() ? " " + note : "") + " 📂" + catName(cat) + " #" + String(id);
+}
+
+static String record(User &u, const std::vector<String> &tok) {
+  if (!timeReady()) return "⏳ ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วลองใหม่";
+  Entry e;
+  String err = parseEntry(u, tok, 0, e);
+  if (err.length()) return err;
+  if (!e.hasAmt) return "❓ จำนวนเงินไม่ถูกต้อง ตัวอย่าง: -120 ค่าน้ำแข็ง";
+
+  Account *a = pick(u, e.key, err);
   if (!a) return err;
-  uint32_t id = store::addTx(*a, amt, note, u.id);
+  if (e.cat.length()) {
+    if (!checkCat(*a, e.cat, err)) return err;
+  } else {
+    e.cat = a->autoCat(e.note);
+  }
+  uint32_t id = store::addTx(*a, e.amt, e.note, e.cat, u.id);
   if (!id) return "⚠️ บันทึกไม่สำเร็จ (พื้นที่เต็ม?) ดู /status";
 
-  String line = signedMoney(amt) + (note.length() ? " " + note : "") + " #" + String(id);
+  String line = txLine(e.amt, e.note, e.cat, id);
   notifyOthers(*a, u.id, "บันทึก " + line);
-  return "✅ " + line + "\n📁 " + a->name;
+  return "✅ " + line + "\n📁 " + a->name + (e.cat.length() ? "" : "\nใส่หมวดด้วย /edit " + String(id) + " @หมวด");
+}
+
+// /edit 12 [-150] [note] [@cat] [#acc]: changes only what is given.
+static String cmdEdit(User &u, const std::vector<String> &tok) {
+  if (tok.size() < 3) return "ใช้: /edit เลขรายการ [-150] [โน้ตใหม่] [@หมวด]";
+  uint32_t id = strtoul(tok[1].c_str() + (tok[1][0] == '#'), nullptr, 10);
+  Entry e;
+  String err = parseEntry(u, tok, 2, e);
+  if (err.length()) return err;
+  Account *a = pick(u, e.key, err);
+  if (!a) return err;
+  if (e.cat.length() && !checkCat(*a, e.cat, err)) return err;
+
+  // Apply only the given fields on top of the current row.
+  Tx changed;
+  if (!store::findTx(*a, id, changed)) return "ไม่พบรายการ #" + String(id) + " ใน " + a->name;
+  if (e.hasAmt) changed.amt = e.amt;
+  if (e.note.length()) changed.note = e.note;
+  if (e.cat.length()) changed.cat = e.cat;
+
+  Tx before;
+  if (!store::editTx(*a, id, changed, before)) return "⚠️ แก้ไม่สำเร็จ";
+  String line = txLine(changed.amt, changed.note, changed.cat, id);
+  notifyOthers(*a, u.id, "แก้ " + line);
+  return "✏️ " + line;
+}
+
+static String cmdCat(User &u, const std::vector<String> &tok) {
+  String err;
+  Account *a = pick(u, tok.size() > 1 ? tok[1] : "", err);
+  if (!a) return err;
+  String s = "📂 หมวดใน " + a->name + "\n";
+  for (const Category &c : a->cats) {
+    s += "• " + c.name;
+    if (c.kw.size()) {
+      s += ":";
+      for (const String &k : c.kw) s += " " + k;
+    }
+    s += "\n";
+  }
+  return s + "\nโน้ตที่มีคำเหล่านี้จะลงหมวดให้อัตโนมัติ\nหรือระบุเองด้วย @หมวด";
+}
+
+// /addcat name [keywords...]: creates the category or adds keywords to it.
+static String cmdAddCat(User &u, const std::vector<String> &tok) {
+  if (tok.size() < 2) return "ใช้: /addcat ชื่อหมวด [คำค้น ...]";
+  String err;
+  Account *a = pick(u, "", err);
+  if (!a) return err;
+  String name = tok[1][0] == '@' ? tok[1].substring(1) : tok[1];
+  if (name.length() == 0 || name.length() > 30) return "ชื่อหมวดยาวเกินไป";
+  Category *c = a->cat(name);
+  bool fresh = !c;
+  if (fresh) {
+    if (a->cats.size() >= 20) return "หมวดเต็มแล้ว (20) ลบด้วย /delcat";
+    a->cats.push_back({name, {}});
+    c = &a->cats.back();
+  }
+  for (size_t i = 2; i < tok.size() && c->kw.size() < 15; i++) c->kw.push_back(tok[i]);
+  store::save();
+  return String(fresh ? "✅ เพิ่มหมวด " : "✅ เพิ่มคำค้นให้ ") + c->name + " ใน " + a->name;
+}
+
+static String cmdDelCat(User &u, const std::vector<String> &tok) {
+  if (tok.size() < 2) return "ใช้: /delcat ชื่อหมวด";
+  String err;
+  Account *a = pick(u, "", err);
+  if (!a) return err;
+  String name = tok[1][0] == '@' ? tok[1].substring(1) : tok[1];
+  for (size_t i = 0; i < a->cats.size(); i++)
+    if (a->cats[i].name.equalsIgnoreCase(name)) {
+      String n = a->cats[i].name;
+      a->cats.erase(a->cats.begin() + i);
+      store::save();
+      return "🗑 ลบหมวด " + n + " (รายการเก่ายังเก็บชื่อหมวดไว้)";
+    }
+  return "ไม่มีหมวด " + name;
+}
+
+static String cmdDelUser(User &u, const std::vector<String> &tok) {
+  if (tok.size() < 2) return "ใช้: /deluser ชื่อ";
+  User *other = store::userByName(tok[1]);
+  if (!other) return "ไม่พบผู้ใช้ " + tok[1];
+  if (other->id == u.id) return "ลบตัวเองไม่ได้";
+  int64_t id = other->id;
+  String name = other->name, err;
+  if (!store::removeUser(id, err)) return "⚠️ " + err;
+  return "✅ ลบ " + name + " แล้ว\nบัญชีส่วนตัวของเขายังเก็บไว้ (ไม่มีใครเห็น) ถ้าเพิ่มกลับจะได้คืน\n"
+         "ถ้าเขาอยู่ใน BOOT_USERS ต้องเอาออกจาก secrets.h ด้วย ไม่งั้นบูตใหม่จะกลับมา";
 }
 
 static String cmdAcc(User &u) {
@@ -301,6 +441,7 @@ static String cmdLast(User &u, const std::vector<String> &tok) {
   for (const Tx &t : txs) {
     s += "#" + String(t.id) + " " + dateTime(t.ts) + " " + signedMoney(t.amt);
     if (t.note.length()) s += " " + t.note;
+    s += " 📂" + catName(t.cat);
     if (!a->priv) s += " (" + nameOf(t.by) + ")";
     s += "\n";
   }
@@ -344,7 +485,7 @@ static String cmdStatus() {
 
 void handle(const tg::Update &up) {
   // Private chats only: a group would leak private accounts to everyone in it.
-  if (!up.isPrivate || up.text.length() == 0) return;
+  if (!up.isPrivate) return;
 
   char idbuf[24];
   snprintf(idbuf, sizeof idbuf, "%lld", (long long)up.fromId);
@@ -356,6 +497,10 @@ void handle(const tg::Update &up) {
     return;
   }
 
+  if (up.text.length() == 0) {  // photo, sticker, voice, ...
+    tg::send(up.chatId, "ตอนนี้รับได้แค่ข้อความ (อ่านรูปสลิปจะมาเร็วๆ นี้)\nพิมพ์ /help ดูวิธีใช้");
+    return;
+  }
   std::vector<String> tok = split(up.text);
   if (tok.empty()) return;
   String cmd = tok[0];
@@ -381,6 +526,11 @@ void handle(const tg::Update &up) {
   else if (cmd == "/last") reply = cmdLast(*u, tok);
   else if (cmd == "/del") reply = cmdDel(*u, tok);
   else if (cmd == "/undo") reply = cmdUndo(*u);
+  else if (cmd == "/edit") reply = cmdEdit(*u, tok);
+  else if (cmd == "/cat") reply = cmdCat(*u, tok);
+  else if (cmd == "/addcat") reply = cmdAddCat(*u, tok);
+  else if (cmd == "/delcat") reply = cmdDelCat(*u, tok);
+  else if (cmd == "/deluser") reply = cmdDelUser(*u, tok);
   else if (cmd == "/status") reply = cmdStatus();
   else reply = "❓ ไม่เข้าใจ พิมพ์ /help";
 
