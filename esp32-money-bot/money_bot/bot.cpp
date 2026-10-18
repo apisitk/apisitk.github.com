@@ -90,7 +90,7 @@ static bool parseAmount(const String &in, int32_t &satang) {
       frac = frac * 10 + (c - '0');
     } else {
       whole = whole * 10 + (c - '0');
-      if (++digits > 8) return false;  // < 100M baht
+      if (++digits > 7) return false;  // < 10M baht, so satang fits int32
     }
   }
   if (fracDigits == 1) frac *= 10;
@@ -256,6 +256,8 @@ static String record(User &u, const std::vector<String> &tok) {
 static String cmdEdit(User &u, const std::vector<String> &tok) {
   if (tok.size() < 3) return "ใช้: /edit เลขรายการ [-150] [โน้ตใหม่] [@หมวด]";
   uint32_t id = strtoul(tok[1].c_str() + (tok[1][0] == '#'), nullptr, 10);
+  int32_t bare;
+  if (parseAmount(tok[2], bare)) return "ใส่ + หรือ - หน้าจำนวน เช่น /edit " + tok[1] + " -" + tok[2];
   Entry e;
   String err = parseEntry(u, tok, 2, e);
   if (err.length()) return err;
@@ -398,6 +400,7 @@ static String cmdAddUser(const std::vector<String> &tok) {
 }
 
 static String cmdToday(User &u, const std::vector<String> &tok) {
+  if (!timeReady()) return "⏳ ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วลองใหม่";
   String err;
   Account *a = pick(u, tok.size() > 1 ? tok[1] : "", err);
   if (!a) return err;
@@ -406,6 +409,7 @@ static String cmdToday(User &u, const std::vector<String> &tok) {
 }
 
 static String cmdMonth(User &u, const std::vector<String> &tok) {
+  if (!timeReady()) return "⏳ ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วลองใหม่";
   time_t now = time(nullptr);
   struct tm lt;
   localtime_r(&now, &lt);
@@ -430,6 +434,7 @@ static String cmdMonth(User &u, const std::vector<String> &tok) {
 }
 
 static String cmdSum(User &u) {
+  if (!timeReady()) return "⏳ ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วลองใหม่";
   time_t now = time(nullptr);
   struct tm lt;
   localtime_r(&now, &lt);
@@ -669,9 +674,10 @@ static void handlePhoto(User &u, const tg::Update &up) {
   }
   if (e.cat.length() && !checkCat(*a, e.cat, err)) e.cat = "";
 
-  // Slip time if it looks sane, else "now" at save time.
-  time_t now = time(nullptr);
-  if (info.ts > now + 86400 || info.ts + 400L * 86400 < (uint32_t)now) info.ts = 0;
+  // Slip time if it looks sane, else "now" at save time. Older than a year
+  // would also fall outside what /del, /edit and the duplicate check search.
+  int64_t now = time(nullptr), age = now - (int64_t)info.ts;
+  if (!timeReady() || age < -86400 || age > 365LL * 86400) info.ts = 0;
 
   Draft d{nextDraft++, u.id, up.chatId, msgId, millis(), a->id, info, -1, false, false, e.note, e.cat,
           e.note.length() > 0, e.cat.length() > 0};
@@ -696,6 +702,10 @@ static void handleCallback(User &u, const tg::Update &up) {
   int c = up.cbData.indexOf(':');
   String op = c > 0 ? up.cbData.substring(c + 1) : "";
   Draft *d = up.cbData[0] == 's' ? findDraft(id) : nullptr;
+  if (d && millis() - d->created > SLIP_DRAFT_MS) {
+    dropDraft(d->id);
+    d = nullptr;
+  }
   if (!d || d->uid != u.id) {
     tg::answer(up.cbId, "หมดเวลาแล้ว ส่งสลิปใหม่อีกครั้ง");
     tg::edit(up.chatId, up.cbMsgId, "⌛ หมดเวลา — ส่งสลิปใหม่อีกครั้ง");
@@ -708,6 +718,10 @@ static void handleCallback(User &u, const tg::Update &up) {
   }
 
   if (op == "ok") {
+    if (!d->info.ts && !timeReady()) {
+      tg::answer(up.cbId, "ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วกดใหม่");
+      return;
+    }
     uint32_t txId = store::addTx(*a, d->dir * d->info.amt, d->note, d->cat, u.id, d->info.ts, d->info.ref);
     if (!txId) {
       tg::answer(up.cbId, "บันทึกไม่สำเร็จ");

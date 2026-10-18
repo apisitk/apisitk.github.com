@@ -492,6 +492,44 @@ int main() {
   backup::now(rep);
   check(sheets[URL_SHOP].tabs["ร้าน (shop)"].count(paid.id) == 1, "slip tx reached the sheet");
 
+  // ---------------- Regressions from the bug sweep ----------------
+  // amounts: satang must fit int32
+  expect(say(ME, "+50000000"), "จำนวนเงินไม่ถูกต้อง", "50M baht rejected (would overflow)");
+  expect(say(ME, "+9,999,999.99 big"), "+9,999,999.99", "max amount ok");
+  say(ME, "/undo");
+
+  // short /myname must not match inside longer names
+  check(!slip::nameMatch("นาย เอกชัย ดี", "เอ"), "'เอ' does not match 'เอกชัย'");
+  check(slip::nameMatch("นาย เอ ดี*", "เอ"), "'เอ' matches first name 'เอ'");
+
+  // /edit with a bare number
+  r = say(ME, "/edit " + std::to_string(paid.id) + " 150");
+  expect(r, "ใส่ + หรือ -", "/edit bare number -> hint");
+  Tx still;
+  check(store::findTx(*shop, paid.id, still) && still.note != "150", "note untouched");
+
+  // /undo after a back-dated slip removes the slip, not the newest-dated row
+  say(ME, "-5 ไอติม");
+  sheets[URL_SLIP].slips["lastmonth"] = slipJson(4200, now - 40 * 86400, "นาย สมชาย ใ***", "ร้าน x", "REF040");
+  photo(ME, "lastmonth");
+  press(ME, button(ME, "บันทึก"));
+  r = say(ME, "/undo");
+  expect(r, "-42.00", "undo removed the back-dated slip");
+  r = say(ME, "/undo");
+  expect(r, "ไอติม", "next undo removes the earlier typed row");
+
+  // one broken sheet does not hold up the others
+  sheets[URL_FAN].secret = "rotated";  // fan changed the secret in their script
+  say(FAN, "-1 ส่วนตัวพัง #me");
+  say(ME, "-7 ร้านต้องไป");
+  Tx shopRow;
+  store::lastBy(*shop, ME, shopRow);
+  check(!backup::now(rep), "sync reports the failure");
+  expect(rep.s, "ชีตของ fan", "error names the broken sheet");
+  check(hasRow(URL_SHOP, "ร้าน (shop)", shopRow.id), "shop row still reached its sheet");
+  sheets[URL_FAN].secret = "s-fan";
+  check(backup::now(rep), "fan's rows go once fixed");
+
   std::cout << "\n" << (failures ? "❌ " : "✅ ") << failures << " failure(s)\n";
   return failures != 0;
 }

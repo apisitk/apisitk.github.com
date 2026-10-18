@@ -42,8 +42,9 @@ static bool okResponse(const String &resp, String &err) {
 }
 
 // Sends one batch of one pending file. Returns false on failure; `sent` is
-// the number of rows the sheet accepted.
-static bool sendBatch(const String &key, size_t &sent, String &err) {
+// the number of rows the sheet accepted. Sheets in `failed` already failed
+// this round and are skipped, so one broken sheet doesn't hold up the others.
+static bool sendBatch(const String &key, size_t &sent, String &err, std::vector<String> &failed) {
   sent = 0;
   std::vector<Tx> rows;
   Account *a = store::unsynced(key, BACKUP_BATCH, rows);
@@ -57,6 +58,8 @@ static bool sendBatch(const String &key, size_t &sent, String &err) {
   }
   Dest to;
   if (!dest(*a, to)) return true;  // nobody has a sheet yet: keep waiting on the board
+  for (const String &f : failed)
+    if (f == to.url) return true;
 
   JsonDocument d;
   d["secret"] = to.secret;
@@ -78,16 +81,19 @@ static bool sendBatch(const String &key, size_t &sent, String &err) {
   }
   String body, resp;
   serializeJson(d, body);
-  if (!gas::post(to.url, body, resp)) {
-    err = "ส่งไม่สำเร็จ (เน็ต/URL)";
+  bool sentOk = gas::post(to.url, body, resp);
+  if (!sentOk) err = "ส่งไม่สำเร็จ (เน็ต/URL)";
+  if (!sentOk || !okResponse(resp, err)) {
+    err = to.label + ": " + err;
+    failed.push_back(to.url);
     return false;
   }
-  if (!okResponse(resp, err)) return false;
 
   std::vector<uint32_t> ids;
   for (const Tx &t : rows) ids.push_back(t.id);
   if (!store::markSynced(key, ids)) {
-    err = "บันทึกสถานะ sync ไม่สำเร็จ";
+    err = "บันทึกสถานะ sync ลงบอร์ดไม่สำเร็จ (พื้นที่เต็ม?)";
+    failed.push_back(to.url);  // rows are in the sheet; resending them later is harmless
     return false;
   }
   sent = rows.size();
@@ -97,21 +103,23 @@ static bool sendBatch(const String &key, size_t &sent, String &err) {
 bool now(String &report) {
   size_t total = 0, waiting = 0;
   String err;
-  bool ok = true;
+  std::vector<String> failed;  // sheets that failed this round
   // Copy: sendBatch may drop entries from the queue while we walk it.
   std::vector<String> keys = store::pending();
   for (const String &key : keys) {
     for (int round = 0; round < BACKUP_MAX_ROUNDS; round++) {
       size_t sent;
-      if (!sendBatch(key, sent, err)) {
-        ok = false;
+      String e;
+      if (!sendBatch(key, sent, e, failed)) {
+        if (err.length()) err += "\n";
+        err += e;
         break;
       }
       total += sent;
       if (sent < BACKUP_BATCH) break;  // file done (or waiting for a sheet)
     }
-    if (!ok) break;
   }
+  bool ok = failed.empty();
   for (const String &key : store::pending()) {
     Account *a = store::account(key.substring(0, key.indexOf('/')));
     Dest to;
@@ -124,7 +132,8 @@ bool now(String &report) {
   } else {
     lastErr = err;
   }
-  report = ok ? "☁️ sync แล้ว " + String((unsigned)total) + " รายการ" : "⚠️ " + err;
+  report = "☁️ sync แล้ว " + String((unsigned)total) + " รายการ";
+  if (!ok) report += "\n⚠️ " + err;
   if (waiting) report += "\n⏸ " + String((unsigned)waiting) + " ไฟล์รอคนตั้ง /backup";
   return ok;
 }

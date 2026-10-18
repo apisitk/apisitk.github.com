@@ -522,19 +522,19 @@ bool editTx(const Account &a, uint32_t id, const Tx &changed, Tx &before) {
 }
 
 bool lastBy(const Account &a, int64_t by, Tx &out) {
+  // Highest id = added last. Not "last line of the newest month": slips are
+  // filed under the month on the slip, which may be long ago.
   time_t now = time(nullptr);
-  for (int back = 0; back < 2; back++) {
-    bool found = false;
+  bool found = false;
+  for (int back = 0; back < KEEP_MONTHS; back++)
     eachTx(txPath(a, monthBack(now, back)), [&](Tx &t) {
-      if (t.by == by && !t.del) {
+      if (t.by == by && !t.del && (!found || t.id > out.id)) {
         out = t;
         found = true;
       }
       return true;
     });
-    if (found) return true;
-  }
-  return false;
+  return found;
 }
 
 std::vector<Tx> recent(const Account &a, size_t n) {

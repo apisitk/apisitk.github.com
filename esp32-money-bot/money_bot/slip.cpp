@@ -97,13 +97,23 @@ static String firstName(const String &in) {
   return sp > 0 ? s.substring(0, sp) : s;
 }
 
+// Characters, not bytes (Thai is 3 bytes each).
+static size_t chars(const String &s) {
+  size_t n = 0;
+  for (char c : s)
+    if ((c & 0xC0) != 0x80) n++;
+  return n;
+}
+
 bool nameMatch(const String &slipName, const String &mine) {
   String a = normalize(slipName), b = normalize(mine);
-  if (a.length() < 2 || b.length() < 2) return false;
-  if (a.indexOf(b) >= 0) return true;  // "ร้านป้าแดง สาขา 2" contains "ร้านป้าแดง"
+  if (!a.length() || !b.length()) return false;
+  // "ร้านป้าแดง สาขา 2" contains "ร้านป้าแดง". Short names ("เอ") would
+  // match inside other names ("เอกชัย"), so those only match as a first name.
+  if (chars(b) >= 4 && a.indexOf(b) >= 0) return true;
   // Slips mask surnames ("สมชาย ใ***", "SOMCHAI J"), so the first name decides.
   String fa = firstName(slipName), fb = firstName(mine);
-  return fa.length() >= 2 && fa == fb;
+  return chars(fa) >= 2 && fa == fb;
 }
 
 int direction(const Account &a, const Info &s) {
