@@ -46,6 +46,7 @@ struct FakeSheet {
   int calls = 0, slipCalls = 0;
   std::map<std::string, std::string> slips;  // file_id -> response JSON (empty = no Typhoon key)
   std::map<uint32_t, std::string> photos;    // tx id -> stored photo file_id ("Drive")
+  std::map<uint32_t, std::string> folders;   // tx id -> Drive folder the bot asked for
 };
 static std::map<std::string, FakeSheet> sheets;
 static bool googleDown = false;
@@ -82,6 +83,7 @@ bool post(const String &url, const String &body, String &resp, uint16_t) {
       if (sh.photos.count(id)) {
       } else if (budget-- > 0) {
         sh.photos[id] = photo;
+        sh.folders[id] = r["folder"] | "";
       } else {
         retry += (retry.empty() ? "" : ",") + std::to_string(id);
       }
@@ -508,6 +510,8 @@ int main() {
   check(sheets[URL_SHOP].tabs["ร้าน (shop)"].count(paid.id) == 1, "slip tx reached the sheet");
   check(sheets[URL_SHOP].photos[paid.id] == "pay1-small", "the <=150KB photo size goes to Drive, not the OCR one");
   check(paid.photo == "pay1-small", "tx keeps the photo id");
+  check(sheets[URL_SHOP].folders[paid.id] == "ร้าน", "shop photos go to folder ร้าน");
+
 
   // Many slips: the sheet takes 8 photos per call and asks for the rest again
   for (int i = 0; i < 11; i++) {
@@ -527,6 +531,17 @@ int main() {
   check(shopPending(), "rest still pending on the board");
   backup::now(rep);
   check(sheets[URL_SHOP].photos.size() == photosBefore + 11 && !shopPending(), "rest sent next time");
+
+  // A private slip lands in its owner's Drive, folder ส่วนตัว
+  sheets[URL_SLIP].slips["fanpriv"] = slipJson(9900, now - 60, "x", "y", "RFP");
+  sheets[URL_FAN].slips.clear();  // fan's script: no Typhoon key -> shared reader
+  photo(FAN, "fanpriv", "#me");
+  press(FAN, button(FAN, "บันทึก"));
+  Tx fp;
+  check(store::findRef(*store::resolve(FAN, "me"), "RFP", fp), "fan's private slip saved");
+  backup::now(rep);
+  check(sheets[URL_FAN].folders[fp.id] == "ส่วนตัว", "private photos go to folder ส่วนตัว");
+  check(!sheets[URL_SHOP].photos.count(fp.id) && !sheets[URL_ME].photos.count(fp.id), "not in anyone else's Drive");
 
   // ---------------- Regressions from the bug sweep ----------------
   // amounts: satang must fit int32

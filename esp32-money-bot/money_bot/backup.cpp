@@ -30,6 +30,14 @@ void kick() { nextAt = millis() + 3000; }
 
 static String sheetName(const Account &a) { return a.name == a.key ? a.key : a.name + " (" + a.key + ")"; }
 
+// Drive folder for slip photos: "ร้าน" for a shared account, "ส่วนตัว" for
+// the private "me" (other private accounts: "ส่วนตัว <name>"), then the
+// script adds <yyyy>/<MM>/<dd>.
+static String photoFolder(const Account &a) {
+  if (!a.priv) return a.name;
+  return a.key == "me" ? String("ส่วนตัว") : "ส่วนตัว " + a.name;
+}
+
 // The web app's {"ok":true} check; anything else is an error message.
 // `retry` gets the ids the sheet wants again (slip photos it had no time for).
 static bool okResponse(const String &resp, String &err, std::vector<uint32_t> *retry = nullptr) {
@@ -74,7 +82,7 @@ static bool sendBatch(const String &key, size_t &sent, bool &more, String &err, 
   d["secret"] = to.secret;
   d["action"] = "rows";
   JsonArray arr = d["rows"].to<JsonArray>();
-  String sheet = sheetName(*a);
+  String sheet = sheetName(*a), folder = photoFolder(*a);
   for (const Tx &t : rows) {
     JsonObject o = arr.add<JsonObject>();
     o["sheet"] = sheet;
@@ -86,7 +94,10 @@ static bool sendBatch(const String &key, size_t &sent, bool &more, String &err, 
     User *by = store::user(t.by);
     o["by"] = by ? by->name : String("?");
     if (t.ref.length()) o["ref"] = t.ref;
-    if (t.photo.length()) o["photo"] = t.photo;
+    if (t.photo.length()) {
+      o["photo"] = t.photo;
+      o["folder"] = folder;
+    }
     if (t.del) o["del"] = true;
   }
   String body, resp;

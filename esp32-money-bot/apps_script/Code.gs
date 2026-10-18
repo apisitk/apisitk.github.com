@@ -5,8 +5,9 @@
  *
  * action "rows": backup. Each account gets its own tab. Rows are upserted by
  *   transaction id, so re-sending is harmless; deleted ones are removed.
- *   Slip photos (Telegram file_id) are copied into this Google Drive and
- *   linked in the sheet; needs BOT_TOKEN in Script Properties.
+ *   Slip photos (Telegram file_id) are copied into this Google Drive under
+ *   money-bot สลิป/<ร้าน|ส่วนตัว>/<yyyy>/<MM>/<dd>/ and linked in the sheet;
+ *   needs BOT_TOKEN in Script Properties.
  * action "slip": reads a bank slip photo from Telegram with Typhoon
  *   (needs TYPHOON_KEY and BOT_TOKEN in Script Properties). Nothing is stored.
  */
@@ -144,7 +145,7 @@ function upsert(sh, tab, rows, photos) {
 
 // ---------- slip photos in Drive ----------
 
-// Copies a Telegram photo into Drive: money-bot สลิป / <tab> / <yyyy-MM>.
+// Copies a Telegram photo into Drive: money-bot สลิป / <folder> / yyyy / MM / dd.
 // Returns a HYPERLINK formula, "" if it can't ever work (no BOT_TOKEN, file
 // gone), throws on errors worth retrying.
 function storePhoto(r, tab) {
@@ -160,11 +161,14 @@ function storePhoto(r, tab) {
     throw new Error('getFile: ' + info.description);
   }
   const when = new Date(r.ts * 1000);
-  const name = Utilities.formatDate(when, TZ, 'yyyyMMdd-HHmm') + '_' + r.id + '_' + Math.abs(r.amt / 100) + '.jpg';
+  const name = Utilities.formatDate(when, TZ, 'HHmm') + '_' + r.id + '_' + Math.abs(r.amt / 100) + '.jpg';
   const blob = UrlFetchApp.fetch('https://api.telegram.org/file/bot' + token + '/' + info.result.file_path)
     .getBlob()
     .setName(name);
-  const folder = child(child(photoRoot(), tab), Utilities.formatDate(when, TZ, 'yyyy-MM'));
+  let folder = child(photoRoot(), r.folder || tab); // "ร้าน", "ส่วนตัว"
+  ['yyyy', 'MM', 'dd'].forEach(function (part) {
+    folder = child(folder, Utilities.formatDate(when, TZ, part));
+  });
   const file = folder.createFile(blob);
   return '=HYPERLINK("https://drive.google.com/file/d/' + file.getId() + '/view","ดูสลิป")';
 }

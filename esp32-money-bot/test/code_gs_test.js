@@ -103,7 +103,7 @@ const ctx = {
     base64Encode: (b) => Buffer.from(b).toString('base64'),
     formatDate: (d, tz, fmt) => {
       const t = new Date(d.getTime() + 7 * 3600e3).toISOString(); // Asia/Bangkok
-      return fmt === 'yyyy-MM' ? t.slice(0, 7) : t.slice(0, 10).replace(/-/g, '') + '-' + t.slice(11, 16).replace(':', '');
+      return { yyyy: t.slice(0, 4), MM: t.slice(5, 7), dd: t.slice(8, 10), HHmm: t.slice(11, 16).replace(':', '') }[fmt];
     },
   },
   encodeURIComponent,
@@ -178,15 +178,22 @@ check(call({ secret: 'nope', action: 'slip', file_id: 'good' }).error === 'wrong
 
 // ---- slip photos to Drive ----
 const ok = (rows) => call({ secret: 'sek', action: 'rows', rows });
-let res = ok([row(50, -35000, { photo: 'ph50', ts: 1760774400 })]);
+let res = ok([row(50, -35000, { photo: 'ph50', folder: 'ร้าน', ts: 1760774400 })]);
 const shp = sheets['ร้าน (shop)'];
+const shp_row = (id) => shp.rows.find((r) => r[0] === id);
 const r50 = () => shp.rows.find((r) => r[0] === 50);
 check(res.ok && res.retry.length === 0, 'photo row ok');
 const link = r50()[8];
 check(/^=HYPERLINK\("https:\/\/drive\.google\.com\/file\/d\/fi\d+\/view","ดูสลิป"\)$/.test(link), 'link formula: ' + link);
 const f50 = drive.files[/d\/(fi\d+)/.exec(link)[1]];
-check(pathOf(f50) === 'money-bot สลิป/ร้าน (shop)/2025-10/20251018-1500_50_350.jpg', 'drive path: ' + pathOf(f50));
-check(props.PHOTO_FOLDER_ID === f50.folder.parent.parent.id, 'root folder id remembered');
+check(pathOf(f50) === 'money-bot สลิป/ร้าน/2025/10/18/1500_50_350.jpg', 'drive path: ' + pathOf(f50));
+check(props.PHOTO_FOLDER_ID === f50.folder.parent.parent.parent.parent.id, 'root folder id remembered');
+ok([row(51, -100, { sheet: 'ส่วนตัว me (me)', photo: 'ph51', folder: 'ส่วนตัว', ts: 1760774400 + 86400 })]);
+const f51 = drive.files[/d\/(fi\d+)/.exec(sheets['ส่วนตัว me (me)'].rows.find((r) => r[0] === 51)[8])[1]];
+check(pathOf(f51) === 'money-bot สลิป/ส่วนตัว/2025/10/19/1500_51_1.jpg', 'private path: ' + pathOf(f51));
+check(f51.folder.parent.parent.parent.parent === f50.folder.parent.parent.parent.parent, 'one root folder');
+const sameDay = ok([row(52, -1, { photo: 'ph52', folder: 'ร้าน', ts: 1760774400 + 60 })]);
+check(drive.files[/d\/(fi\d+)/.exec(shp_row(52)[8])[1]].folder === f50.folder, 'same day reuses the folder');
 
 const filesBefore = Object.keys(drive.files).length;
 ok([row(50, -40000, { photo: 'ph50', ts: 1760774400 })]); // edit amount
