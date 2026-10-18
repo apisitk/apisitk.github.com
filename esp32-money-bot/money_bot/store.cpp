@@ -144,6 +144,7 @@ static String toLine(const Tx &t) {
   d["n"] = t.note;
   if (t.cat.length()) d["c"] = t.cat;
   if (t.ref.length()) d["r"] = t.ref;
+  if (t.photo.length()) d["p"] = t.photo;
   d["b"] = t.by;
   if (t.del) d["d"] = 1;
   d["s"] = t.synced ? 1 : 0;
@@ -161,6 +162,7 @@ static bool fromLine(const String &line, Tx &t) {
   t.note = d["n"] | "";
   t.cat = d["c"] | "";
   t.ref = d["r"] | "";
+  t.photo = d["p"] | "";
   t.by = d["b"].as<int64_t>();
   t.del = d["d"] | 0;
   t.synced = d["s"] | 0;
@@ -420,11 +422,12 @@ bool unshare(Account &a, int64_t uid, String &err) {
 }
 
 uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &cat, int64_t by, uint32_t ts,
-               const String &ref) {
+               const String &ref, const String &photo) {
   Tx t;
   t.id = prefs.getUInt("txid", 0) + 1;
   t.ts = ts ? ts : time(nullptr);
   t.ref = ref;
+  t.photo = photo;
   t.amt = amt;
   t.note = utf8Cut(note, TX_NOTE_MAX);
   t.cat = cat;

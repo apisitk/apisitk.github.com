@@ -5,11 +5,16 @@
  *
  * action "rows": backup. Each account gets its own tab. Rows are upserted by
  *   transaction id, so re-sending is harmless; deleted ones are removed.
+ *   Slip photos (Telegram file_id) are copied into this Google Drive and
+ *   linked in the sheet; needs BOT_TOKEN in Script Properties.
  * action "slip": reads a bank slip photo from Telegram with Typhoon
  *   (needs TYPHOON_KEY and BOT_TOKEN in Script Properties). Nothing is stored.
  */
 
-const HEADER = ['id', 'วันเวลา', 'ประเภท', 'จำนวน', 'หมวด', 'โน้ต', 'โดย', 'เลขอ้างอิง'];
+const HEADER = ['id', 'วันเวลา', 'ประเภท', 'จำนวน', 'หมวด', 'โน้ต', 'โดย', 'เลขอ้างอิง', 'สลิป'];
+const PHOTO_COL = 9;
+const PHOTOS_PER_CALL = 8; // Drive uploads per request; the rest are asked for again (`retry`)
+const PHOTO_ROOT = 'money-bot สลิป';
 const TZ = 'Asia/Bangkok';
 const TYPHOON_URL = 'https://api.opentyphoon.ai/v1/chat/completions';
 // Override in Script Properties (OCR_MODEL / LLM_MODEL) when Typhoon renames models.
@@ -39,7 +44,8 @@ function doPost(e) {
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
-      return reply({ ok: true, n: saveRows(req.rows || []) });
+      const rows = req.rows || [];
+      return reply({ ok: true, n: rows.length, retry: saveRows(rows) });
     } finally {
       lock.releaseLock();
     }
@@ -47,15 +53,18 @@ function doPost(e) {
   return reply({ ok: false, error: 'unknown action' });
 }
 
+// Returns the ids whose photo should be sent again (upload budget or a
+// temporary error); the bot keeps those rows pending.
 function saveRows(rows) {
   const bySheet = {};
   rows.forEach(function (r) {
     (bySheet[r.sheet] = bySheet[r.sheet] || []).push(r);
   });
+  const photos = { budget: PHOTOS_PER_CALL, retry: [] };
   Object.keys(bySheet).forEach(function (name) {
-    upsert(sheetFor(name), bySheet[name]);
+    upsert(sheetFor(name), name, bySheet[name], photos);
   });
-  return rows.length;
+  return photos.retry;
 }
 
 function sheetFor(name) {
@@ -77,13 +86,17 @@ function sheetFor(name) {
   return sh;
 }
 
-function upsert(sh, rows) {
-  // id -> sheet row number
+function upsert(sh, tab, rows, photos) {
+  // id -> sheet row number, and the photo link already in that row
   const index = {};
+  const links = {};
   const last = sh.getLastRow();
   if (last > 1) {
-    sh.getRange(2, 1, last - 1, 1).getValues().forEach(function (v, i) {
+    const ids = sh.getRange(2, 1, last - 1, 1).getValues();
+    const cells = sh.getRange(2, PHOTO_COL, last - 1, 1).getFormulas();
+    ids.forEach(function (v, i) {
       index[v[0]] = i + 2;
+      links[v[0]] = cells[i][0] || '';
     });
   }
 
@@ -91,9 +104,23 @@ function upsert(sh, rows) {
   const remove = [];
   rows.forEach(function (r) {
     const at = index[r.id];
+    let link = links[r.id] || '';
     if (r.del) {
       if (at) remove.push(at);
+      if (link) trashPhoto(link);
       return;
+    }
+    if (!link && r.photo) {
+      if (photos.budget > 0) {
+        photos.budget--;
+        try {
+          link = storePhoto(r, tab);
+        } catch (e) {
+          photos.retry.push(r.id); // Telegram/Drive hiccup: try again next sync
+        }
+      } else {
+        photos.retry.push(r.id);
+      }
     }
     const values = [
       r.id,
@@ -104,6 +131,7 @@ function upsert(sh, rows) {
       r.note || '',
       r.by || '',
       r.ref ? "'" + r.ref : '', // leading ' keeps long digit strings as text
+      link,
     ];
     if (at) sh.getRange(at, 1, 1, values.length).setValues([values]);
     else append.push(values);
@@ -112,6 +140,64 @@ function upsert(sh, rows) {
   if (append.length) sh.getRange(sh.getLastRow() + 1, 1, append.length, HEADER.length).setValues(append);
   // Bottom-up so earlier row numbers stay valid.
   remove.sort(function (a, b) { return b - a; }).forEach(function (row) { sh.deleteRow(row); });
+}
+
+// ---------- slip photos in Drive ----------
+
+// Copies a Telegram photo into Drive: money-bot สลิป / <tab> / <yyyy-MM>.
+// Returns a HYPERLINK formula, "" if it can't ever work (no BOT_TOKEN, file
+// gone), throws on errors worth retrying.
+function storePhoto(r, tab) {
+  const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  if (!token) return '';
+  const info = JSON.parse(
+    UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/getFile?file_id=' + encodeURIComponent(r.photo), {
+      muteHttpExceptions: true,
+    }).getContentText()
+  );
+  if (!info.ok) {
+    if (info.error_code === 400) return ''; // bad/expired file_id: retrying won't help
+    throw new Error('getFile: ' + info.description);
+  }
+  const when = new Date(r.ts * 1000);
+  const name = Utilities.formatDate(when, TZ, 'yyyyMMdd-HHmm') + '_' + r.id + '_' + Math.abs(r.amt / 100) + '.jpg';
+  const blob = UrlFetchApp.fetch('https://api.telegram.org/file/bot' + token + '/' + info.result.file_path)
+    .getBlob()
+    .setName(name);
+  const folder = child(child(photoRoot(), tab), Utilities.formatDate(when, TZ, 'yyyy-MM'));
+  const file = folder.createFile(blob);
+  return '=HYPERLINK("https://drive.google.com/file/d/' + file.getId() + '/view","ดูสลิป")';
+}
+
+function trashPhoto(link) {
+  const m = /\/d\/([\w-]+)/.exec(link);
+  if (!m) return;
+  try {
+    DriveApp.getFileById(m[1]).setTrashed(true);
+  } catch (e) {
+    // already gone
+  }
+}
+
+function photoRoot() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('PHOTO_FOLDER_ID');
+  if (id) {
+    try {
+      const f = DriveApp.getFolderById(id);
+      if (!f.isTrashed()) return f;
+    } catch (e) {
+      // deleted: make a new one
+    }
+  }
+  const root = DriveApp.createFolder(PHOTO_ROOT);
+  props.setProperty('PHOTO_FOLDER_ID', root.getId());
+  return root;
+}
+
+function child(parent, name) {
+  const it = parent.getFoldersByName(name);
+  return it.hasNext() ? it.next() : parent.createFolder(name);
 }
 
 // ---------- slip reading ----------

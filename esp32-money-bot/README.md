@@ -13,6 +13,7 @@ Telegram bot บันทึกรายรับรายจ่าย รัน
 - [x] 3. หลายบัญชี + สิทธิ์ (shared / private)
 - [x] หมวดหมู่ (อัตโนมัติจากคำในโน้ต หรือ `@หมวด`), `/edit`, `/deluser`
 - [x] 4. Backup ไป Google Sheet (Apps Script) + คิว sync — ตั้งค่าตาม [apps_script/README.md](apps_script/README.md)
+- [x] เก็บรูปสลิปลง Google Drive (≤150KB) + ลิงก์ในชีต
 - [x] 5. อ่านสลิปด้วย Typhoon (ผ่าน Apps Script) + ปุ่มยืนยัน + กันซ้ำ — ตั้งค่าใน [apps_script/README.md](apps_script/README.md#อ่านสลิปด้วย-typhoon)
 
 ## ติดตั้ง (Arduino IDE)

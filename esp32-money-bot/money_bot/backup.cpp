@@ -1,6 +1,7 @@
 #include "backup.h"
 #include "gas.h"
 #include <ArduinoJson.h>
+#include <algorithm>
 
 namespace backup {
 
@@ -30,22 +31,30 @@ void kick() { nextAt = millis() + 3000; }
 static String sheetName(const Account &a) { return a.name == a.key ? a.key : a.name + " (" + a.key + ")"; }
 
 // The web app's {"ok":true} check; anything else is an error message.
-static bool okResponse(const String &resp, String &err) {
+// `retry` gets the ids the sheet wants again (slip photos it had no time for).
+static bool okResponse(const String &resp, String &err, std::vector<uint32_t> *retry = nullptr) {
   JsonDocument d;
   if (deserializeJson(d, resp)) {
     err = "ตอบกลับไม่ใช่ JSON (URL ถูกไหม? deploy เป็น Anyone หรือยัง?)";
     return false;
   }
-  if (d["ok"] | false) return true;
-  err = d["error"] | "unknown error";
-  return false;
+  if (!(d["ok"] | false)) {
+    err = d["error"] | "unknown error";
+    return false;
+  }
+  if (retry)
+    for (JsonVariant id : d["retry"].as<JsonArray>()) retry->push_back(id.as<uint32_t>());
+  return true;
 }
 
 // Sends one batch of one pending file. Returns false on failure; `sent` is
 // the number of rows the sheet accepted. Sheets in `failed` already failed
 // this round and are skipped, so one broken sheet doesn't hold up the others.
-static bool sendBatch(const String &key, size_t &sent, String &err, std::vector<String> &failed) {
+// `more` = the sheet asked for some rows again (photo uploads it had no time
+// for); those are sent on the next tick so the bot stays responsive.
+static bool sendBatch(const String &key, size_t &sent, bool &more, String &err, std::vector<String> &failed) {
   sent = 0;
+  more = false;
   std::vector<Tx> rows;
   Account *a = store::unsynced(key, BACKUP_BATCH, rows);
   if (!a) {
@@ -77,26 +86,30 @@ static bool sendBatch(const String &key, size_t &sent, String &err, std::vector<
     User *by = store::user(t.by);
     o["by"] = by ? by->name : String("?");
     if (t.ref.length()) o["ref"] = t.ref;
+    if (t.photo.length()) o["photo"] = t.photo;
     if (t.del) o["del"] = true;
   }
   String body, resp;
   serializeJson(d, body);
   bool sentOk = gas::post(to.url, body, resp);
   if (!sentOk) err = "ส่งไม่สำเร็จ (เน็ต/URL)";
-  if (!sentOk || !okResponse(resp, err)) {
+  std::vector<uint32_t> retry;
+  if (!sentOk || !okResponse(resp, err, &retry)) {
     err = to.label + ": " + err;
     failed.push_back(to.url);
     return false;
   }
 
   std::vector<uint32_t> ids;
-  for (const Tx &t : rows) ids.push_back(t.id);
+  for (const Tx &t : rows)
+    if (std::find(retry.begin(), retry.end(), t.id) == retry.end()) ids.push_back(t.id);
   if (!store::markSynced(key, ids)) {
     err = "บันทึกสถานะ sync ลงบอร์ดไม่สำเร็จ (พื้นที่เต็ม?)";
     failed.push_back(to.url);  // rows are in the sheet; resending them later is harmless
     return false;
   }
-  sent = rows.size();
+  sent = ids.size();
+  more = !retry.empty();
   return true;
 }
 
@@ -109,14 +122,15 @@ bool now(String &report) {
   for (const String &key : keys) {
     for (int round = 0; round < BACKUP_MAX_ROUNDS; round++) {
       size_t sent;
+      bool more;
       String e;
-      if (!sendBatch(key, sent, e, failed)) {
+      if (!sendBatch(key, sent, more, e, failed)) {
         if (err.length()) err += "\n";
         err += e;
         break;
       }
       total += sent;
-      if (sent < BACKUP_BATCH) break;  // file done (or waiting for a sheet)
+      if (more || sent < BACKUP_BATCH) break;  // file done, waiting for a sheet, or photos next tick
     }
   }
   bool ok = failed.empty();

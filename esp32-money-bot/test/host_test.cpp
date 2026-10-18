@@ -45,6 +45,7 @@ struct FakeSheet {
   std::map<std::string, std::map<uint32_t, std::string>> tabs;  // tab -> id -> "amt|cat|note|by"
   int calls = 0, slipCalls = 0;
   std::map<std::string, std::string> slips;  // file_id -> response JSON (empty = no Typhoon key)
+  std::map<uint32_t, std::string> photos;    // tx id -> stored photo file_id ("Drive")
 };
 static std::map<std::string, FakeSheet> sheets;
 static bool googleDown = false;
@@ -67,15 +68,28 @@ bool post(const String &url, const String &body, String &resp, uint16_t) {
     else resp = sh.slips[req["file_id"].as<std::string>()];
     return true;
   }
+  int budget = 8;  // like PHOTOS_PER_CALL in Code.gs
+  std::string retry;
   for (JsonObject r : req["rows"].as<JsonArray>()) {
     auto &tab = sh.tabs[r["sheet"].as<std::string>()];
     uint32_t id = r["id"];
-    if (r["del"] | false) tab.erase(id);
-    else
-      tab[id] = std::to_string(r["amt"].as<int>()) + "|" + r["cat"].as<std::string>() + "|" +
-                r["note"].as<std::string>() + "|" + r["by"].as<std::string>();
+    if (r["del"] | false) {
+      tab.erase(id);
+      continue;
+    }
+    std::string photo = r["photo"] | "";
+    if (photo.size()) {
+      if (sh.photos.count(id)) {
+      } else if (budget-- > 0) {
+        sh.photos[id] = photo;
+      } else {
+        retry += (retry.empty() ? "" : ",") + std::to_string(id);
+      }
+    }
+    tab[id] = std::to_string(r["amt"].as<int>()) + "|" + r["cat"].as<std::string>() + "|" +
+              r["note"].as<std::string>() + "|" + r["by"].as<std::string>();
   }
-  resp = "{\"ok\":true}";
+  resp = "{\"ok\":true,\"retry\":[" + retry + "]}";
   return true;
 }
 }  // namespace gas
@@ -93,6 +107,7 @@ static std::string photo(int64_t from, const std::string &fileId, const std::str
   u.chatId = u.fromId = from;
   u.isPrivate = true;
   u.photoId = fileId.c_str();
+  u.keepId = (fileId + "-small").c_str();
   u.caption = caption.c_str();
   bot::handle(u);
   std::string r = inbox[from].empty() ? "" : inbox[from].back();
@@ -487,10 +502,31 @@ int main() {
   photo(FAN, "pay1");
   check(sheets[URL_SLIP].slipCalls == sharedBefore + 1, "fan's own Typhoon key used, shared not called");
 
-  // Backup carries the ref
+  // Backup carries the ref and the small photo
   say(ME, "/backup shop " + URL_SHOP + " s-shop");
   backup::now(rep);
   check(sheets[URL_SHOP].tabs["ร้าน (shop)"].count(paid.id) == 1, "slip tx reached the sheet");
+  check(sheets[URL_SHOP].photos[paid.id] == "pay1-small", "the <=150KB photo size goes to Drive, not the OCR one");
+  check(paid.photo == "pay1-small", "tx keeps the photo id");
+
+  // Many slips: the sheet takes 8 photos per call and asks for the rest again
+  for (int i = 0; i < 11; i++) {
+    std::string f = "bulk" + std::to_string(i);
+    sheets[URL_SLIP].slips[f] = slipJson(100 + i, now - 120, "นาย สมชาย ใ***", "x", ("RB" + std::to_string(i)).c_str());
+    photo(ME, f);
+    press(ME, button(ME, "บันทึก"));
+  }
+  auto shopPending = [] {
+    for (const String &k : store::pending())
+      if (k.startsWith("shop/")) return true;
+    return false;
+  };
+  size_t photosBefore = sheets[URL_SHOP].photos.size();
+  backup::now(rep);
+  check(sheets[URL_SHOP].photos.size() == photosBefore + 8, "8 photos in the first call");
+  check(shopPending(), "rest still pending on the board");
+  backup::now(rep);
+  check(sheets[URL_SHOP].photos.size() == photosBefore + 11 && !shopPending(), "rest sent next time");
 
   // ---------------- Regressions from the bug sweep ----------------
   // amounts: satang must fit int32

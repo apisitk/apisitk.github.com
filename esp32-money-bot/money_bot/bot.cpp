@@ -567,6 +567,7 @@ struct Draft {
   int32_t msgId;
   unsigned long created;
   String acc;  // account id
+  String keepId;  // photo size to store in Drive
   slip::Info info;
   int dir;            // +1 income, -1 expense
   bool sure;          // direction known (names matched, caption or flipped)
@@ -679,7 +680,7 @@ static void handlePhoto(User &u, const tg::Update &up) {
   int64_t now = time(nullptr), age = now - (int64_t)info.ts;
   if (!timeReady() || age < -86400 || age > 365LL * 86400) info.ts = 0;
 
-  Draft d{nextDraft++, u.id, up.chatId, msgId, millis(), a->id, info, -1, false, false, e.note, e.cat,
+  Draft d{nextDraft++, u.id, up.chatId, msgId, millis(), a->id, up.keepId, info, -1, false, false, e.note, e.cat,
           e.note.length() > 0, e.cat.length() > 0};
   if (e.hasAmt) {
     d.dir = e.amt > 0 ? 1 : -1;
@@ -722,7 +723,8 @@ static void handleCallback(User &u, const tg::Update &up) {
       tg::answer(up.cbId, "ยังไม่ได้ซิงค์เวลา รอสักครู่แล้วกดใหม่");
       return;
     }
-    uint32_t txId = store::addTx(*a, d->dir * d->info.amt, d->note, d->cat, u.id, d->info.ts, d->info.ref);
+    uint32_t txId =
+        store::addTx(*a, d->dir * d->info.amt, d->note, d->cat, u.id, d->info.ts, d->info.ref, d->keepId);
     if (!txId) {
       tg::answer(up.cbId, "บันทึกไม่สำเร็จ");
       return;
@@ -730,7 +732,11 @@ static void handleCallback(User &u, const tg::Update &up) {
     backup::kick();
     String line = txLine(d->dir * d->info.amt, d->note, d->cat, txId);
     tg::answer(up.cbId, "บันทึกแล้ว");
-    tg::edit(d->chat, d->msgId, "✅ " + line + "\n📁 " + a->name + (d->info.ts ? "\n📅 " + dateTime(d->info.ts) : ""));
+    backup::Dest to;
+    String kept = backup::dest(*a, to) ? "\n🖼 รูปสลิปจะเก็บลง Drive (" + to.label + ")"
+                                       : "\n🖼 รูปจะเก็บลง Drive เมื่อบัญชีนี้มีชีต (/backup)";
+    tg::edit(d->chat, d->msgId,
+             "✅ " + line + "\n📁 " + a->name + (d->info.ts ? "\n📅 " + dateTime(d->info.ts) : "") + kept);
     notifyOthers(*a, u.id, "บันทึกสลิป " + line);
     dropDraft(d->id);
     return;

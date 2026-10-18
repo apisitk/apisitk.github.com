@@ -17,6 +17,7 @@ function fakeSheet(name) {
           vals.forEach((v, i) => { rows[a - 1 + i] = v.slice(); });
           return this;
         },
+        getFormulas() { return this.getValues().map((row) => row.map((v) => (v === undefined ? '' : v))); },
         getValues() {
           const out = [];
           for (let i = 0; i < nr; i++) {
@@ -35,6 +36,23 @@ function fakeSheet(name) {
 }
 
 const sheets = {};
+const drive = { folders: {}, files: {}, n: 0 };
+function fakeFolder(name, parent) {
+  const f = {
+    id: 'fo' + ++drive.n, name, parent, kids: [], trashed: false,
+    getId() { return this.id; }, isTrashed() { return this.trashed; },
+    getFoldersByName(n) { const m = this.kids.filter((k) => k.name === n); return { hasNext: () => m.length > 0, next: () => m[0] }; },
+    createFolder(n) { const k = fakeFolder(n, this); this.kids.push(k); return k; },
+    createFile(blob) {
+      const file = { id: 'fi' + ++drive.n, name: blob.name, folder: this, trashed: false, getId() { return this.id; }, setTrashed(v) { this.trashed = v; } };
+      drive.files[file.id] = file;
+      return file;
+    },
+  };
+  drive.folders[f.id] = f;
+  return f;
+}
+const pathOf = (file) => { const p = []; for (let f = file.folder; f; f = f.parent) p.unshift(f.name); return p.join('/') + '/' + file.name; };
 const props = { SECRET: 'sek' };
 const fetched = [];
 let llmReply = '';
@@ -45,10 +63,15 @@ function resp(code, body) {
 function fetchFake(url, opts) {
   fetched.push({ url, opts });
   if (url.includes('/getFile?file_id=')) {
-    return url.includes('bad') ? resp(400, '{"ok":false,"description":"file not found"}')
+    if (url.includes('flaky')) return resp(502, '{"ok":false,"error_code":502,"description":"Bad Gateway"}');
+    return url.includes('bad') ? resp(400, '{"ok":false,"error_code":400,"description":"file not found"}')
       : resp(200, '{"ok":true,"result":{"file_path":"photos/file_1.jpg"}}');
   }
-  if (url.includes('/file/bot')) return resp(200, '');
+  if (url.includes('/file/bot')) {
+    const r = resp(200, '');
+    r.getBlob = () => ({ name: '', getBytes: () => [0xff, 0xd8, 1, 2], setName(n) { this.name = n; return this; } });
+    return r;
+  }
   if (url.includes('opentyphoon')) {
     if (typhoonStatus !== 200) return resp(typhoonStatus, '{"error":"rate limited"}');
     const body = JSON.parse(opts.payload);
@@ -67,9 +90,22 @@ const ctx = {
       setSpreadsheetTimeZone: (z) => { tz = z; },
     }),
   },
-  PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] || null }) },
+  PropertiesService: {
+    getScriptProperties: () => ({ getProperty: (k) => props[k] || null, setProperty: (k, v) => { props[k] = v; } }),
+  },
+  DriveApp: {
+    createFolder: (n) => fakeFolder(n),
+    getFolderById: (id) => { if (!drive.folders[id]) throw new Error('no folder'); return drive.folders[id]; },
+    getFileById: (id) => { if (!drive.files[id]) throw new Error('no file'); return drive.files[id]; },
+  },
   UrlFetchApp: { fetch: (url, opts) => fetchFake(url, opts) },
-  Utilities: { base64Encode: (b) => Buffer.from(b).toString('base64') },
+  Utilities: {
+    base64Encode: (b) => Buffer.from(b).toString('base64'),
+    formatDate: (d, tz, fmt) => {
+      const t = new Date(d.getTime() + 7 * 3600e3).toISOString(); // Asia/Bangkok
+      return fmt === 'yyyy-MM' ? t.slice(0, 7) : t.slice(0, 10).replace(/-/g, '') + '-' + t.slice(11, 16).replace(':', '');
+    },
+  },
   encodeURIComponent,
   LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
   ContentService: {
@@ -139,6 +175,41 @@ check(/file not found/.test(slip('bad').error), 'telegram error passed on');
 typhoonStatus = 429;
 check(/HTTP 429/.test(slip('good').error), 'Typhoon HTTP error passed on');
 check(call({ secret: 'nope', action: 'slip', file_id: 'good' }).error === 'wrong secret', 'slip needs the secret');
+
+// ---- slip photos to Drive ----
+const ok = (rows) => call({ secret: 'sek', action: 'rows', rows });
+let res = ok([row(50, -35000, { photo: 'ph50', ts: 1760774400 })]);
+const shp = sheets['ร้าน (shop)'];
+const r50 = () => shp.rows.find((r) => r[0] === 50);
+check(res.ok && res.retry.length === 0, 'photo row ok');
+const link = r50()[8];
+check(/^=HYPERLINK\("https:\/\/drive\.google\.com\/file\/d\/fi\d+\/view","ดูสลิป"\)$/.test(link), 'link formula: ' + link);
+const f50 = drive.files[/d\/(fi\d+)/.exec(link)[1]];
+check(pathOf(f50) === 'money-bot สลิป/ร้าน (shop)/2025-10/20251018-1500_50_350.jpg', 'drive path: ' + pathOf(f50));
+check(props.PHOTO_FOLDER_ID === f50.folder.parent.parent.id, 'root folder id remembered');
+
+const filesBefore = Object.keys(drive.files).length;
+ok([row(50, -40000, { photo: 'ph50', ts: 1760774400 })]); // edit amount
+check(Object.keys(drive.files).length === filesBefore && r50()[8] === link && r50()[3] === -400, 'edit keeps the same photo');
+
+const many = [];
+for (let i = 60; i < 72; i++) many.push(row(i, -100, { photo: 'p' + i }));
+res = ok(many);
+check(res.retry.length === 12 - 8, 'upload budget: 8 now, rest retried (' + res.retry + ')');
+res = ok(many.filter((r) => res.retry.includes(r.id)));
+check(res.retry.length === 0 && shp.rows.filter((r) => r[0] >= 60 && r[0] < 72 && r[8]).length === 12, 'retried photos stored');
+
+res = ok([row(80, -1, { photo: 'flaky' }), row(81, -1, { photo: 'bad' })]);
+check(res.retry.includes(80) && !res.retry.includes(81), 'temporary error retried, permanent not');
+check(shp.rows.find((r) => r[0] === 81)[8] === '', 'bad photo -> empty cell');
+
+ok([row(50, 0, { del: true })]);
+check(f50.trashed && !r50(), 'deleting the row trashes the photo');
+
+delete props.BOT_TOKEN;
+res = ok([row(90, -1, { photo: 'ph90' })]);
+check(res.retry.length === 0 && shp.rows.find((r) => r[0] === 90)[8] === '', 'no BOT_TOKEN: row saved, no photo, no retry loop');
+check(shp.rows[0][8] === 'สลิป', 'header has photo column');
 
 console.log(failures ? `❌ ${failures} failure(s)` : '✅ Code.gs: 0 failure(s)');
 process.exit(failures ? 1 : 0);

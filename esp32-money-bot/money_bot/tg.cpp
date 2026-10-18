@@ -58,6 +58,7 @@ bool poll(int64_t offset, int timeoutSec, std::vector<Update> &out) {
   f["message"]["text"] = true;
   f["message"]["caption"] = true;
   f["message"]["photo"][0]["file_id"] = true;
+  f["message"]["photo"][0]["file_size"] = true;
   f["message"]["document"]["file_id"] = true;
   f["message"]["document"]["mime_type"] = true;
   f["callback_query"]["message"]["chat"]["id"] = true;
@@ -89,10 +90,15 @@ bool poll(int64_t offset, int timeoutSec, std::vector<Update> &out) {
     } else {
       up.text = m["text"] | "";  // empty for photos, stickers, ...
       up.caption = m["caption"] | "";
+      // Telegram keeps each photo in several sizes, smallest first. Read the
+      // largest; keep the largest one that fits the size limit.
       JsonArray photo = m["photo"];
-      if (photo.size()) up.photoId = photo[photo.size() - 1]["file_id"] | "";  // largest is last
+      for (JsonObject ps : photo) {
+        up.photoId = ps["file_id"] | "";
+        if ((ps["file_size"] | 0) <= SLIP_KEEP_MAX_BYTES || !up.keepId.length()) up.keepId = up.photoId;
+      }
       String mime = m["document"]["mime_type"] | "";
-      if (mime.startsWith("image/")) up.photoId = m["document"]["file_id"] | "";
+      if (mime.startsWith("image/")) up.photoId = up.keepId = m["document"]["file_id"] | "";  // one size only
     }
     out.push_back(up);
   }

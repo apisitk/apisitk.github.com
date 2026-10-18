@@ -13,7 +13,7 @@
 #define TX_NOTE_MAX    80        // bytes of note kept per transaction
 #define WIFI_REBOOT_MS (5UL * 60 * 1000)  // reboot if WiFi is down this long
 
-#define GAS_TIMEOUT_MS      20000             // Apps Script can be slow to wake up
+#define GAS_TIMEOUT_MS      45000             // Apps Script can be slow; batches with slip photos more so
 #define BACKUP_BATCH        40                // rows per request
 #define BACKUP_MAX_ROUNDS   5                 // batches per file per sync, keeps the bot responsive
 #define BACKUP_IDLE_MS      (60UL * 1000)     // check the queue this often
@@ -23,3 +23,4 @@
 #define SLIP_TIMEOUT_MS     60000             // download + OCR + extraction in Apps Script
 #define SLIP_DRAFT_MS       (60UL * 60 * 1000)  // unconfirmed slip drafts expire after this
 #define SLIP_MAX_DRAFTS     10
+#define SLIP_KEEP_MAX_BYTES 150000            // photo size kept in Drive (Telegram's own smaller copies)

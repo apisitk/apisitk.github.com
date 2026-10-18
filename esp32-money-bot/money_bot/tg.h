@@ -14,7 +14,8 @@ struct Update {
   String fromName;
   String text;
   bool isPrivate = false;
-  String photoId;  // largest photo, or an image sent as a file
+  String photoId;  // largest photo, or an image sent as a file (for OCR)
+  String keepId;   // largest size within SLIP_KEEP_MAX_BYTES (to store in Drive)
   String caption;  // text under the photo
   // Inline keyboard button press (callback_query):
   String cbId, cbData;
