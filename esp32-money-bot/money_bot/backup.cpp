@@ -73,6 +73,7 @@ static bool sendBatch(const String &key, size_t &sent, String &err) {
     o["note"] = t.note;
     User *by = store::user(t.by);
     o["by"] = by ? by->name : String("?");
+    if (t.ref.length()) o["ref"] = t.ref;
     if (t.del) o["del"] = true;
   }
   String body, resp;

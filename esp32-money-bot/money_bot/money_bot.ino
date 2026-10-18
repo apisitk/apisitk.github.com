@@ -4,10 +4,16 @@
 #include "secrets.h"
 #include "backup.h"
 #include "bot.h"
+#include "slip.h"
 #include "store.h"
 #include "tg.h"
 #include <Preferences.h>
 #include <WiFi.h>
+
+#ifndef SLIP_URL  // secrets.h from before slip reading
+#define SLIP_URL ""
+#define SLIP_SECRET ""
+#endif
 
 struct BootUser {
   int64_t id;
@@ -71,6 +77,7 @@ void setup() {
   connectWiFi();
   configTzTime(TZ_INFO, NTP_1, NTP_2);
   tg::begin(BOT_TOKEN);
+  slip::begin(SLIP_URL, SLIP_SECRET);
   Serial.println("[boot] ready");
 }
 

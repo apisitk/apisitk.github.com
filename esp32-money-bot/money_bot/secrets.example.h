@@ -8,11 +8,17 @@
 // From @BotFather
 #define BOT_TOKEN "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-// Users created on first boot only: {telegram chat id, name}.
-// Not sure of your chat id? Flash with any value, then send /id to the bot.
-// More users can be added later in chat with /adduser.
+// Users added at boot if missing: {telegram chat id, name}.
+// Not sure of your chat id? Flash with any value, send /id to the bot, fix
+// it here and flash again. More users can be added in chat with /adduser.
 #define BOOT_USERS { {111111111LL, "me"}, {222222222LL, "fan"} }
 
-// Shared account created on first boot, with all BOOT_USERS as members.
+// Shared account created at boot if missing, with all BOOT_USERS as members.
 #define BOOT_SHARED_KEY  "shop"
 #define BOOT_SHARED_NAME "ร้าน"
+
+// Slip reader (step 5): an Apps Script web app with TYPHOON_KEY and BOT_TOKEN
+// in its Script Properties (apps_script/README.md). Used for users whose own
+// sheet script has no Typhoon key. "" = off.
+#define SLIP_URL    ""
+#define SLIP_SECRET ""

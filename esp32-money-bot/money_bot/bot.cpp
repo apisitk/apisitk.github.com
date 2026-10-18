@@ -1,6 +1,8 @@
 #include "bot.h"
 #include "backup.h"
+#include "slip.h"
 #include "store.h"
+#include <ArduinoJson.h>
 #include <WiFi.h>
 
 namespace bot {
@@ -13,6 +15,8 @@ static const char *HELP =
     "  -120 ค่าน้ำแข็ง      รายจ่าย (หมวดอัตโนมัติ)\n"
     "  -80 กาแฟ @อาหาร #me  ระบุหมวด/บัญชีเอง\n"
     "  /edit 12 -150 @หมวด  แก้รายการ\n"
+    "  📷 ส่งรูปสลิป        อ่านให้ แล้วกดยืนยัน\n"
+    "     (ใส่ข้อความใต้รูปได้ เช่น #me @อาหาร)\n"
     "  /del 12  /undo     ลบรายการ\n"
     "\n"
     "ดูยอด\n"
@@ -20,6 +24,9 @@ static const char *HELP =
     "  /month [บัญชี] [2026-10]  ทั้งเดือน\n"
     "  /sum               ทุกบัญชีเดือนนี้\n"
     "  /last [บัญชี] [10]  รายการล่าสุด\n"
+    "\n"
+    "สลิป\n"
+    "  /myname ชื่อ นามสกุล  ชื่อบัญชีธนาคารของบัญชีนี้\n"
     "\n"
     "หมวด\n"
     "  /cat [บัญชี]        ดูหมวดและคำค้น\n"
@@ -545,6 +552,227 @@ static String cmdStatus() {
   return buf + backup::status();
 }
 
+// ---------- bank slips ----------
+//
+// A photo becomes a draft with buttons; nothing is saved until ✅.
+
+struct Draft {
+  uint32_t id;
+  int64_t uid, chat;
+  int32_t msgId;
+  unsigned long created;
+  String acc;  // account id
+  slip::Info info;
+  int dir;            // +1 income, -1 expense
+  bool sure;          // direction known (names matched, caption or flipped)
+  bool ownAmt;        // amount/direction given in the caption
+  String note, cat;   // current values
+  bool noteSet, catSet;  // given in the caption, don't recompute
+};
+
+static std::vector<Draft> drafts;
+static uint32_t nextDraft = 1;
+
+static Draft *findDraft(uint32_t id) {
+  for (Draft &d : drafts)
+    if (d.id == id) return &d;
+  return nullptr;
+}
+
+static void dropDraft(uint32_t id) {
+  for (size_t i = 0; i < drafts.size(); i++)
+    if (drafts[i].id == id) drafts.erase(drafts.begin() + i);
+}
+
+// Recomputes direction-dependent note and category.
+static void refresh(Draft &d, Account &a) {
+  if (!d.noteSet) {
+    d.note = d.dir > 0 ? "รับจาก " + d.info.from : "โอนให้ " + d.info.to;
+    if (d.info.memo.length()) d.note += " " + d.info.memo;
+  }
+  if (!d.catSet) d.cat = a.autoCat(d.note);
+}
+
+static String draftText(const Draft &d, Account &a) {
+  const slip::Info &s = d.info;
+  String t = "🧾 สลิป\n" + signedMoney(d.dir * s.amt) + (d.sure ? "" : "  ❓ไม่แน่ใจว่ารับหรือจ่าย") + "\n";
+  t += "จาก: " + s.from + (s.fromBank.length() ? " (" + s.fromBank + ")" : "") + "\n";
+  t += "ถึง: " + s.to + (s.toBank.length() ? " (" + s.toBank + ")" : "") + "\n";
+  t += "📅 " + (s.ts ? dateTime(s.ts) : String("(ใช้เวลาตอนนี้)")) + "\n";
+  t += "📝 " + d.note + "\n📂 " + catName(d.cat) + "\n📁 " + a.name;
+  if (s.ref.length()) t += "\nเลขอ้างอิง: " + s.ref;
+  Tx dup;
+  if (store::findRef(a, s.ref, dup)) t += "\n\n⚠️ สลิปนี้บันทึกไปแล้ว #" + String(dup.id) + " (" + dateTime(dup.ts) + ")";
+  if (!d.sure) t += "\n\n💡 ตั้งชื่อบัญชีธนาคารด้วย /myname จะได้เดาถูก";
+  return t;
+}
+
+static String draftKeyboard(const Draft &d, User &u) {
+  String p = "s" + String(d.id) + ":";
+  JsonDocument kb;
+  JsonArray row = kb.add<JsonArray>();
+  auto button = [](JsonArray r, const String &text, const String &data) {
+    JsonObject b = r.add<JsonObject>();
+    b["text"] = text;
+    b["callback_data"] = data;
+  };
+  button(row, "✅ บันทึก", p + "ok");
+  button(row, "↔️ รับ/จ่าย", p + "flip");
+  button(row, "❌ ยกเลิก", p + "x");
+  JsonArray accs = kb.add<JsonArray>();
+  int n = 0;
+  for (Account *a : store::visible(u.id)) {
+    if (a->id == d.acc || n == 6) continue;
+    if (n == 3) accs = kb.add<JsonArray>();
+    button(accs, "📁 " + a->name, p + "a:" + a->key);
+    n++;
+  }
+  if (!n) kb.remove(1);
+  String out;
+  serializeJson(kb, out);
+  return out;
+}
+
+static void showDraft(Draft &d, User &u) {
+  Account *a = store::account(d.acc);
+  if (a) tg::edit(d.chat, d.msgId, draftText(d, *a), draftKeyboard(d, u));
+}
+
+static void handlePhoto(User &u, const tg::Update &up) {
+  if (!slip::enabled(u)) {
+    tg::send(up.chatId, "📷 ยังไม่ได้ตั้งค่าอ่านสลิป — ดู apps_script/README.md\nพิมพ์บันทึกเองได้ เช่น -350 ค่าของ");
+    return;
+  }
+  // Housekeeping: expire old drafts, cap how many wait at once.
+  for (size_t i = 0; i < drafts.size(); i++)
+    if (millis() - drafts[i].created > SLIP_DRAFT_MS) drafts.erase(drafts.begin() + i--);
+  if (drafts.size() >= SLIP_MAX_DRAFTS) drafts.erase(drafts.begin());
+
+  int32_t msgId = tg::send(up.chatId, "🔍 กำลังอ่านสลิป... (10–30 วินาที)");
+  slip::Info info;
+  String err;
+  if (!slip::read(u, up.photoId, info, err)) {
+    String t = "⚠️ อ่านสลิปไม่ได้: " + err + "\nพิมพ์บันทึกเองได้ เช่น -350 ค่าของ";
+    if (msgId > 1) tg::edit(up.chatId, msgId, t);
+    else tg::send(up.chatId, t);
+    return;
+  }
+
+  // The caption works like a typed entry: "#me", "@วัตถุดิบ", a note, or "+"/"-amount".
+  Entry e;
+  parseEntry(u, split(up.caption), 0, e);
+  Account *a = pick(u, e.key, err);
+  if (!a) a = pick(u, "", err);
+  if (!a) {
+    tg::send(up.chatId, err);
+    return;
+  }
+  if (e.cat.length() && !checkCat(*a, e.cat, err)) e.cat = "";
+
+  // Slip time if it looks sane, else "now" at save time.
+  time_t now = time(nullptr);
+  if (info.ts > now + 86400 || info.ts + 400L * 86400 < (uint32_t)now) info.ts = 0;
+
+  Draft d{nextDraft++, u.id, up.chatId, msgId, millis(), a->id, info, -1, false, false, e.note, e.cat,
+          e.note.length() > 0, e.cat.length() > 0};
+  if (e.hasAmt) {
+    d.dir = e.amt > 0 ? 1 : -1;
+    d.info.amt = abs(e.amt);
+    d.sure = d.ownAmt = true;
+  } else {
+    int dir = slip::direction(*a, info);
+    d.dir = dir ? dir : -1;  // most slips you keep are payments
+    d.sure = dir != 0;
+  }
+  refresh(d, *a);
+  if (msgId <= 1) d.msgId = tg::send(up.chatId, "🧾");
+  drafts.push_back(d);
+  showDraft(drafts.back(), u);
+}
+
+// Button presses: "s<draft>:ok", ":flip", ":x", ":a:<account key>".
+static void handleCallback(User &u, const tg::Update &up) {
+  uint32_t id = strtoul(up.cbData.c_str() + 1, nullptr, 10);
+  int c = up.cbData.indexOf(':');
+  String op = c > 0 ? up.cbData.substring(c + 1) : "";
+  Draft *d = up.cbData[0] == 's' ? findDraft(id) : nullptr;
+  if (!d || d->uid != u.id) {
+    tg::answer(up.cbId, "หมดเวลาแล้ว ส่งสลิปใหม่อีกครั้ง");
+    tg::edit(up.chatId, up.cbMsgId, "⌛ หมดเวลา — ส่งสลิปใหม่อีกครั้ง");
+    return;
+  }
+  Account *a = store::account(d->acc);
+  if (!a || !a->has(u.id)) {
+    tg::answer(up.cbId, "ไม่มีสิทธิ์บัญชีนี้แล้ว");
+    return;
+  }
+
+  if (op == "ok") {
+    uint32_t txId = store::addTx(*a, d->dir * d->info.amt, d->note, d->cat, u.id, d->info.ts, d->info.ref);
+    if (!txId) {
+      tg::answer(up.cbId, "บันทึกไม่สำเร็จ");
+      return;
+    }
+    backup::kick();
+    String line = txLine(d->dir * d->info.amt, d->note, d->cat, txId);
+    tg::answer(up.cbId, "บันทึกแล้ว");
+    tg::edit(d->chat, d->msgId, "✅ " + line + "\n📁 " + a->name + (d->info.ts ? "\n📅 " + dateTime(d->info.ts) : ""));
+    notifyOthers(*a, u.id, "บันทึกสลิป " + line);
+    dropDraft(d->id);
+    return;
+  }
+  if (op == "x") {
+    tg::answer(up.cbId);
+    tg::edit(d->chat, d->msgId, "❌ ยกเลิกสลิปแล้ว");
+    dropDraft(d->id);
+    return;
+  }
+  if (op == "flip") {
+    d->dir = -d->dir;
+    d->sure = true;
+  } else if (op.startsWith("a:")) {
+    Account *to = store::resolve(u.id, op.substring(2));
+    if (!to) {
+      tg::answer(up.cbId, "ไม่พบบัญชี");
+      return;
+    }
+    a = to;
+    d->acc = to->id;
+    if (d->catSet && !to->cat(d->cat)) d->catSet = false;  // that category doesn't exist there
+    if (!d->ownAmt) {
+      int dir = slip::direction(*to, d->info);
+      if (dir) d->dir = dir;
+      d->sure = dir != 0;
+    }
+  }
+  refresh(*d, *a);
+  tg::answer(up.cbId);
+  showDraft(*d, u);
+}
+
+// /myname                 names on this account's slips
+// /myname ชื่อ นามสกุล     add one (as on the bank slip)
+// /myname clear
+static String cmdMyName(User &u, const std::vector<String> &tok) {
+  String err;
+  Account *a = pick(u, "", err);
+  if (!a) return err;
+  if (tok.size() == 2 && tok[1].equalsIgnoreCase("clear")) {
+    a->myNames.clear();
+    store::save();
+    return "🗑 ล้างชื่อของ " + a->name + " แล้ว";
+  }
+  if (tok.size() >= 2) {
+    if (a->myNames.size() >= 10) return "ครบ 10 ชื่อแล้ว ใช้ /myname clear";
+    a->myNames.push_back(joinFrom(tok, 1));
+    store::save();
+  }
+  String s = "🏦 ชื่อบัญชีธนาคารของ " + a->name + ":\n";
+  for (const String &n : a->myNames) s += "• " + n + "\n";
+  if (a->myNames.empty()) s += "(ยังไม่มี)\n";
+  return s + "\nสลิปที่โอน 'ถึง' ชื่อนี้ = รายรับ, 'จาก' ชื่อนี้ = รายจ่าย\nเพิ่ม: /myname ชื่อ นามสกุล (ไทยหรืออังกฤษตามสลิป)";
+}
+
 void handle(const tg::Update &up) {
   // Private chats only: a group would leak private accounts to everyone in it.
   if (!up.isPrivate) return;
@@ -559,8 +787,16 @@ void handle(const tg::Update &up) {
     return;
   }
 
-  if (up.text.length() == 0) {  // photo, sticker, voice, ...
-    tg::send(up.chatId, "ตอนนี้รับได้แค่ข้อความ (อ่านรูปสลิปจะมาเร็วๆ นี้)\nพิมพ์ /help ดูวิธีใช้");
+  if (up.cbId.length()) {
+    handleCallback(*u, up);
+    return;
+  }
+  if (up.photoId.length()) {
+    handlePhoto(*u, up);
+    return;
+  }
+  if (up.text.length() == 0) {  // sticker, voice, ...
+    tg::send(up.chatId, "รับได้แค่ข้อความและรูปสลิป\nพิมพ์ /help ดูวิธีใช้");
     return;
   }
   std::vector<String> tok = split(up.text);
@@ -595,6 +831,7 @@ void handle(const tg::Update &up) {
   else if (cmd == "/deluser") reply = cmdDelUser(*u, tok);
   else if (cmd == "/backup") reply = cmdBackup(*u, tok);
   else if (cmd == "/sync") reply = cmdSync();
+  else if (cmd == "/myname") reply = cmdMyName(*u, tok);
   else if (cmd == "/status") reply = cmdStatus();
   else reply = "❓ ไม่เข้าใจ พิมพ์ /help";
 

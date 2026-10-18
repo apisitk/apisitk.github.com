@@ -143,6 +143,7 @@ static String toLine(const Tx &t) {
   d["a"] = t.amt;
   d["n"] = t.note;
   if (t.cat.length()) d["c"] = t.cat;
+  if (t.ref.length()) d["r"] = t.ref;
   d["b"] = t.by;
   if (t.del) d["d"] = 1;
   d["s"] = t.synced ? 1 : 0;
@@ -159,6 +160,7 @@ static bool fromLine(const String &line, Tx &t) {
   t.amt = d["a"];
   t.note = d["n"] | "";
   t.cat = d["c"] | "";
+  t.ref = d["r"] | "";
   t.by = d["b"].as<int64_t>();
   t.del = d["d"] | 0;
   t.synced = d["s"] | 0;
@@ -226,7 +228,8 @@ static void load() {
   for (JsonObject u : d["users"].as<JsonArray>())
     gUsers.push_back({u["id"].as<int64_t>(), u["n"] | "", u["c"] | "", u["bu"] | "", u["bs"] | ""});
   for (JsonObject a : d["accs"].as<JsonArray>()) {
-    Account acc{a["id"] | "", a["k"] | "", a["n"] | "", a["p"] | false, {}, {}, a["bu"] | "", a["bs"] | ""};
+    Account acc{a["id"] | "", a["k"] | "", a["n"] | "", a["p"] | false, {}, {}, a["bu"] | "", a["bs"] | "", {}};
+    for (JsonVariant n : a["nm"].as<JsonArray>()) acc.myNames.push_back(n | "");
     for (JsonVariant m : a["m"].as<JsonArray>()) acc.members.push_back(m.as<int64_t>());
     if (a["c"].isNull()) acc.cats = acc.priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS);  // db from before categories
     for (JsonObject c : a["c"].as<JsonArray>()) {
@@ -274,6 +277,10 @@ bool save() {
     }
     JsonArray m = o["m"].to<JsonArray>();
     for (int64_t id : a.members) m.add(id);
+    if (a.myNames.size()) {
+      JsonArray nm = o["nm"].to<JsonArray>();
+      for (const String &n : a.myNames) nm.add(n);
+    }
     JsonArray cs = o["c"].to<JsonArray>();
     for (const Category &c : a.cats) {
       JsonObject co = cs.add<JsonObject>();
@@ -371,7 +378,7 @@ Account *create(int64_t owner, const String &key, const String &name, bool priv,
     return nullptr;
   }
   gAccounts.push_back({id, k, name.length() ? name : k, priv, {owner},
-                       priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS), "", ""});
+                       priv ? defaults(PERSONAL_CATS) : defaults(SHOP_CATS), "", "", {}});
   save();
   return &gAccounts.back();
 }
@@ -412,10 +419,12 @@ bool unshare(Account &a, int64_t uid, String &err) {
   return save();
 }
 
-uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &cat, int64_t by) {
+uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &cat, int64_t by, uint32_t ts,
+               const String &ref) {
   Tx t;
   t.id = prefs.getUInt("txid", 0) + 1;
-  t.ts = time(nullptr);
+  t.ts = ts ? ts : time(nullptr);
+  t.ref = ref;
   t.amt = amt;
   t.note = utf8Cut(note, TX_NOTE_MAX);
   t.cat = cat;
@@ -463,6 +472,23 @@ static bool rewriteTx(const Account &a, uint32_t id, Tx &before, F fn) {
     if (!replaceFile(tmp, path)) return false;
     markPending(a, monthBack(now, back));
     return true;
+  }
+  return false;
+}
+
+bool findRef(const Account &a, const String &ref, Tx &out) {
+  if (!ref.length()) return false;
+  time_t now = time(nullptr);
+  for (int back = 0; back < KEEP_MONTHS; back++) {
+    bool found = false;
+    eachTx(txPath(a, monthBack(now, back)), [&](Tx &t) {
+      if (t.ref == ref && !t.del) {
+        out = t;
+        found = true;
+      }
+      return !found;
+    });
+    if (found) return true;
   }
   return false;
 }

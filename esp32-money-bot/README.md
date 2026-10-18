@@ -13,7 +13,7 @@ Telegram bot บันทึกรายรับรายจ่าย รัน
 - [x] 3. หลายบัญชี + สิทธิ์ (shared / private)
 - [x] หมวดหมู่ (อัตโนมัติจากคำในโน้ต หรือ `@หมวด`), `/edit`, `/deluser`
 - [x] 4. Backup ไป Google Sheet (Apps Script) + คิว sync — ตั้งค่าตาม [apps_script/README.md](apps_script/README.md)
-- [ ] 5. อ่านสลิปด้วย Typhoon (ผ่าน Apps Script) + ปุ่มยืนยัน + กันซ้ำ
+- [x] 5. อ่านสลิปด้วย Typhoon (ผ่าน Apps Script) + ปุ่มยืนยัน + กันซ้ำ — ตั้งค่าใน [apps_script/README.md](apps_script/README.md#อ่านสลิปด้วย-typhoon)
 
 ## ติดตั้ง (Arduino IDE)
 
@@ -42,6 +42,9 @@ PlatformIO ก็ใช้ได้: `pio run -t upload` (มี `platformio.ini
 | `-120.50 ค่าน้ำแข็ง` | รายจ่าย |
 | `-80 กาแฟ #me` | ลงบัญชี `me` (ส่วนตัว) โดยไม่ต้องเปลี่ยนบัญชี |
 | `-50 ถุงมือ @บรรจุภัณฑ์` | ระบุหมวดเอง (ไม่ระบุ = เดาจากคำในโน้ต, ไม่เจอ = อื่นๆ) |
+| 📷 ส่งรูปสลิป | อ่านด้วย Typhoon → กด ✅ บันทึก / ↔️ รับ-จ่าย / 📁 เปลี่ยนบัญชี / ❌ |
+| 📷 + ข้อความใต้รูป `#me @อาหาร ข้าว` | ระบุบัญชี/หมวด/โน้ตของสลิป |
+| `/myname สมชาย ใจดี` | ชื่อบัญชีธนาคารของบัญชีที่ใช้อยู่ — สลิปที่โอนถึงชื่อนี้ = รายรับ, จากชื่อนี้ = รายจ่าย |
 | `/edit 12 -150 โน้ตใหม่ @หมวด` | แก้รายการ — ใส่เฉพาะส่วนที่จะเปลี่ยน |
 | `/cat` `/addcat ชื่อ [คำค้น..]` `/delcat ชื่อ` | หมวดของบัญชีที่ใช้อยู่ (แต่ละบัญชีมีหมวดของตัวเอง) |
 | `/today [บัญชี]` `/month [บัญชี] [2026-09]` | สรุปยอด |
@@ -87,8 +90,9 @@ money_bot/
   bot.*           แปลคำสั่ง, เช็คสิทธิ์, หมวด, ตอบกลับ
   backup.*        คิว sync → Google Sheet (retry/backoff, ส่งทีละ 40 แถว)
   gas.*           HTTPS ไป Google Apps Script (ตาม redirect)
+  slip.*          อ่านสลิป (ผ่าน Apps Script), เทียบชื่อ → รับ/จ่าย
 apps_script/
-  Code.gs         วางใน Apps Script ของ Google Sheet (upsert ตาม id)
+  Code.gs         วางใน Apps Script ของ Google Sheet: backup (upsert ตาม id) + อ่านสลิป (Typhoon)
   config.h        ค่าตั้งที่ไม่ลับ
   ca_bundle.h     root CA (สร้างจาก tools/make_ca_bundle.py)
 ```

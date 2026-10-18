@@ -37,6 +37,7 @@ bool poll(int64_t offset, int timeoutSec, std::vector<Update> &out) {
   req["timeout"] = timeoutSec;
   req["limit"] = POLL_LIMIT;
   req["allowed_updates"][0] = "message";
+  req["allowed_updates"][1] = "callback_query";
   String body, resp;
   serializeJson(req, body);
 
@@ -55,6 +56,17 @@ bool poll(int64_t offset, int timeoutSec, std::vector<Update> &out) {
   f["message"]["from"]["id"] = true;
   f["message"]["from"]["first_name"] = true;
   f["message"]["text"] = true;
+  f["message"]["caption"] = true;
+  f["message"]["photo"][0]["file_id"] = true;
+  f["message"]["document"]["file_id"] = true;
+  f["message"]["document"]["mime_type"] = true;
+  f["callback_query"]["message"]["chat"]["id"] = true;
+  f["callback_query"]["message"]["chat"]["type"] = true;
+  f["callback_query"]["message"]["message_id"] = true;
+  f["callback_query"]["id"] = true;
+  f["callback_query"]["data"] = true;
+  f["callback_query"]["from"]["id"] = true;
+  f["callback_query"]["from"]["first_name"] = true;
 
   JsonDocument doc;
   if (deserializeJson(doc, resp, DeserializationOption::Filter(filter))) return false;
@@ -62,26 +74,73 @@ bool poll(int64_t offset, int timeoutSec, std::vector<Update> &out) {
   for (JsonObject u : doc["result"].as<JsonArray>()) {
     Update up;
     up.updateId = u["update_id"].as<int64_t>();
-    JsonObject m = u["message"];
+    JsonObject cb = u["callback_query"];
+    bool isCb = !cb.isNull();
+    JsonObject m = isCb ? cb["message"].as<JsonObject>() : u["message"].as<JsonObject>();
+    JsonObject from = isCb ? cb["from"].as<JsonObject>() : m["from"].as<JsonObject>();
     up.chatId = m["chat"]["id"].as<int64_t>();
     up.isPrivate = m["chat"]["type"] == "private";
-    up.fromId = m["from"]["id"].as<int64_t>();
-    up.fromName = m["from"]["first_name"] | "";
-    up.text = m["text"] | "";  // empty for photos, stickers, ...
+    up.fromId = from["id"].as<int64_t>();
+    up.fromName = from["first_name"] | "";
+    if (isCb) {
+      up.cbId = cb["id"] | "";
+      up.cbData = cb["data"] | "";
+      up.cbMsgId = m["message_id"] | 0;
+    } else {
+      up.text = m["text"] | "";  // empty for photos, stickers, ...
+      up.caption = m["caption"] | "";
+      JsonArray photo = m["photo"];
+      if (photo.size()) up.photoId = photo[photo.size() - 1]["file_id"] | "";  // largest is last
+      String mime = m["document"]["mime_type"] | "";
+      if (mime.startsWith("image/")) up.photoId = m["document"]["file_id"] | "";
+    }
     out.push_back(up);
   }
   return true;
 }
 
-bool send(int64_t chatId, const String &text) {
+static void addKeyboard(JsonDocument &req, const String &keyboard) {
+  if (keyboard.length()) req["reply_markup"]["inline_keyboard"] = serialized(keyboard);
+}
+
+int32_t send(int64_t chatId, const String &text, const String &keyboard) {
   JsonDocument req;
   req["chat_id"] = chatId;
   req["text"] = text;  // plain text: no parse_mode, so no escaping needed
+  addKeyboard(req, keyboard);
   String body, resp;
   serializeJson(req, body);
   int code = post("sendMessage", body, resp, 15000);
-  if (code != 200) Serial.printf("[tg] sendMessage http %d %s\n", code, resp.c_str());
+  if (code != 200) {
+    Serial.printf("[tg] sendMessage http %d %s\n", code, resp.c_str());
+    return 0;
+  }
+  JsonDocument filter, doc;
+  filter["result"]["message_id"] = true;
+  deserializeJson(doc, resp, DeserializationOption::Filter(filter));
+  return doc["result"]["message_id"] | 1;  // 1: sent, id unknown
+}
+
+bool edit(int64_t chatId, int32_t msgId, const String &text, const String &keyboard) {
+  JsonDocument req;
+  req["chat_id"] = chatId;
+  req["message_id"] = msgId;
+  req["text"] = text;
+  addKeyboard(req, keyboard);  // no keyboard given = buttons removed
+  String body, resp;
+  serializeJson(req, body);
+  int code = post("editMessageText", body, resp, 15000);
+  if (code != 200) Serial.printf("[tg] editMessageText http %d %s\n", code, resp.c_str());
   return code == 200;
+}
+
+void answer(const String &cbId, const String &text) {
+  JsonDocument req;
+  req["callback_query_id"] = cbId;
+  if (text.length()) req["text"] = text;
+  String body, resp;
+  serializeJson(req, body);
+  post("answerCallbackQuery", body, resp, 10000);
 }
 
 }  // namespace tg

@@ -35,6 +35,28 @@ function fakeSheet(name) {
 }
 
 const sheets = {};
+const props = { SECRET: 'sek' };
+const fetched = [];
+let llmReply = '';
+let typhoonStatus = 200;
+function resp(code, body) {
+  return { getResponseCode: () => code, getContentText: () => body, getBlob: () => ({ getBytes: () => [0xff, 0xd8, 1, 2] }) };
+}
+function fetchFake(url, opts) {
+  fetched.push({ url, opts });
+  if (url.includes('/getFile?file_id=')) {
+    return url.includes('bad') ? resp(400, '{"ok":false,"description":"file not found"}')
+      : resp(200, '{"ok":true,"result":{"file_path":"photos/file_1.jpg"}}');
+  }
+  if (url.includes('/file/bot')) return resp(200, '');
+  if (url.includes('opentyphoon')) {
+    if (typhoonStatus !== 200) return resp(typhoonStatus, '{"error":"rate limited"}');
+    const body = JSON.parse(opts.payload);
+    const isOcr = Array.isArray(body.messages[0].content);
+    return resp(200, JSON.stringify({ choices: [{ message: { content: isOcr ? 'โอนเงินสำเร็จ 350.00 บาท' : llmReply } }] }));
+  }
+  throw new Error('unexpected fetch ' + url);
+}
 let tz = 'Etc/GMT';
 const ctx = {
   SpreadsheetApp: {
@@ -45,7 +67,10 @@ const ctx = {
       setSpreadsheetTimeZone: (z) => { tz = z; },
     }),
   },
-  PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (k === 'SECRET' ? 'sek' : null) }) },
+  PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] || null }) },
+  UrlFetchApp: { fetch: (url, opts) => fetchFake(url, opts) },
+  Utilities: { base64Encode: (b) => Buffer.from(b).toString('base64') },
+  encodeURIComponent,
   LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
   ContentService: {
     MimeType: { JSON: 'json' },
@@ -83,6 +108,37 @@ call({ secret: 'sek', action: 'rows', rows: [row(1, 0, { del: true }), row(4, 0,
 check(sh.rows.length === 2 && sh.rows[1][0] === 2, 'multi delete keeps the right row');
 call({ secret: 'sek', action: 'rows', rows: [row(7, -100, { sheet: 'ส่วนตัว me (me)', cat: '' })] });
 check(sheets['ส่วนตัว me (me)'].rows[1][4] === 'อื่นๆ', 'second tab, empty category -> อื่นๆ');
+
+// ---- slip ----
+const slip = (id) => call({ secret: 'sek', action: 'slip', file_id: id });
+check(/not set/.test(slip('a').error), 'slip without TYPHOON_KEY/BOT_TOKEN');
+props.TYPHOON_KEY = 'tk';
+props.BOT_TOKEN = '123:abc';
+llmReply = 'นี่คือผลลัพธ์\n```json\n{"is_slip":true,"amount":"1,350.50","date":"2568-10-18","time":"14:32",' +
+  '"from_name":"นาย สมชาย ใ***","from_bank":"KBank","to_name":"แม็คโคร","to_bank":"SCB","ref":"0161 2345 ABC","memo":""}\n```';
+let r = slip('good');
+check(r.ok, 'slip ok: ' + JSON.stringify(r));
+check(r.slip.amt === 135050, 'amount with comma -> satang');
+check(r.slip.ts === Date.UTC(2025, 9, 18, 7, 32) / 1000, 'Buddhist year + Thai time -> unix');
+check(r.slip.ref === '01612345ABC' && r.slip.to === 'แม็คโคร', 'fields');
+const ocrCall = fetched.find((f) => f.url.includes('opentyphoon') && JSON.parse(f.opts.payload).model === 'typhoon-ocr');
+check(ocrCall && JSON.parse(ocrCall.opts.payload).messages[0].content[1].image_url.url.startsWith('data:image/jpeg;base64,'), 'OCR gets jpeg data URL');
+check(ocrCall.opts.headers.Authorization === 'Bearer tk', 'Typhoon auth header');
+check(fetched.some((f) => f.url.includes('typhoon') === false && f.url.includes('/bot123:abc/getFile')), 'bot token only used toward Telegram');
+props.OCR_MODEL = 'typhoon-ocr-new';
+slip('good');
+check(fetched.some((f) => f.url.includes('opentyphoon') && JSON.parse(f.opts.payload).model === 'typhoon-ocr-new'), 'OCR_MODEL override');
+
+llmReply = '{"is_slip":false}';
+check(slip('good').error === 'รูปนี้ไม่ใช่สลิป', 'not a slip');
+llmReply = '{"is_slip":true,"amount":0}';
+check(/จำนวนเงิน/.test(slip('good').error), 'no amount');
+llmReply = 'sorry';
+check(slip('good').error === 'อ่านผลจาก AI ไม่ได้', 'garbage from LLM');
+check(/file not found/.test(slip('bad').error), 'telegram error passed on');
+typhoonStatus = 429;
+check(/HTTP 429/.test(slip('good').error), 'Typhoon HTTP error passed on');
+check(call({ secret: 'nope', action: 'slip', file_id: 'good' }).error === 'wrong secret', 'slip needs the secret');
 
 console.log(failures ? `❌ ${failures} failure(s)` : '✅ Code.gs: 0 failure(s)');
 process.exit(failures ? 1 : 0);

@@ -34,6 +34,7 @@ struct Account {
   std::vector<int64_t> members;
   std::vector<Category> cats;
   String bkUrl, bkSecret;  // own backup sheet; "" = use a member's sheet
+  std::vector<String> myNames;  // names on this account's bank slips (/myname)
   bool has(int64_t uid) const;
   Category *cat(const String &name);  // case-insensitive
   String autoCat(const String &note) const;  // "" if nothing matches
@@ -45,6 +46,7 @@ struct Tx {
   int32_t amt = 0;    // satang; >0 income, <0 expense
   String note;
   String cat;  // "" = uncategorized
+  String ref;  // bank slip reference, "" if typed by hand
   int64_t by = 0;
   bool del = false;
   bool synced = false;
@@ -81,7 +83,10 @@ Account *create(int64_t owner, const String &key, const String &name, bool priv,
 bool share(Account &a, int64_t uid, String &err);
 bool unshare(Account &a, int64_t uid, String &err);
 
-uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &cat, int64_t by);
+// ts 0 = now. ref = slip reference for duplicate checks.
+uint32_t addTx(const Account &a, int32_t amt, const String &note, const String &cat, int64_t by,
+               uint32_t ts = 0, const String &ref = "");
+bool findRef(const Account &a, const String &ref, Tx &out);  // live tx with this slip ref
 bool findTx(const Account &a, uint32_t id, Tx &out);  // live tx only
 bool delTx(const Account &a, uint32_t id, Tx &removed);
 // Replaces amt/note/cat of a live tx; `before` gets the old values.

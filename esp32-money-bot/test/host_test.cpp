@@ -3,6 +3,7 @@
 #include "../money_bot/backup.h"
 #include "../money_bot/bot.h"
 #include "../money_bot/gas.h"
+#include "../money_bot/slip.h"
 #include <ArduinoJson.h>
 #include "../money_bot/store.h"
 #include <LittleFS.h>
@@ -17,15 +18,24 @@ WiFiShim WiFi;
 LittleFSShim LittleFS;
 std::string FS_ROOT;
 
-// Fake Telegram: remember what was sent to whom.
+// Fake Telegram: remember what was sent to whom (edits count as messages).
 static std::map<int64_t, std::vector<std::string>> inbox;
+static std::map<int64_t, std::string> lastKeyboard;
+static int32_t lastMsgId = 100;
 namespace tg {
 void begin(const char *) {}
 bool poll(int64_t, int, std::vector<Update> &) { return true; }
-bool send(int64_t chat, const String &text) {
+int32_t send(int64_t chat, const String &text, const String &kb) {
   inbox[chat].push_back(text.s);
+  lastKeyboard[chat] = kb.s;
+  return ++lastMsgId;
+}
+bool edit(int64_t chat, int32_t, const String &text, const String &kb) {
+  inbox[chat].push_back(text.s);
+  lastKeyboard[chat] = kb.s;
   return true;
 }
+void answer(const String &, const String &) {}
 }  // namespace tg
 
 // Fake Apps Script web apps, keyed by URL. Mirrors Code.gs: checks the
@@ -33,13 +43,14 @@ bool send(int64_t chat, const String &text) {
 struct FakeSheet {
   std::string secret;
   std::map<std::string, std::map<uint32_t, std::string>> tabs;  // tab -> id -> "amt|cat|note|by"
-  int calls = 0;
+  int calls = 0, slipCalls = 0;
+  std::map<std::string, std::string> slips;  // file_id -> response JSON (empty = no Typhoon key)
 };
 static std::map<std::string, FakeSheet> sheets;
 static bool googleDown = false;
 
 namespace gas {
-bool post(const String &url, const String &body, String &resp) {
+bool post(const String &url, const String &body, String &resp, uint16_t) {
   if (googleDown || !sheets.count(url.s)) return false;
   FakeSheet &sh = sheets[url.s];
   sh.calls++;
@@ -47,6 +58,13 @@ bool post(const String &url, const String &body, String &resp) {
   deserializeJson(req, body.s);
   if (req["secret"] != sh.secret.c_str()) {
     resp = "{\"ok\":false,\"error\":\"wrong secret\"}";
+    return true;
+  }
+  if (req["action"] == "slip") {
+    sh.slipCalls++;
+    if (sh.slips.empty()) resp = "{\"ok\":false,\"error\":\"BOT_TOKEN / TYPHOON_KEY not set in Script Properties\"}";
+    else if (!sh.slips.count(req["file_id"].as<std::string>())) resp = "{\"ok\":false,\"error\":\"รูปนี้ไม่ใช่สลิป\"}";
+    else resp = sh.slips[req["file_id"].as<std::string>()];
     return true;
   }
   for (JsonObject r : req["rows"].as<JsonArray>()) {
@@ -61,6 +79,51 @@ bool post(const String &url, const String &body, String &resp) {
   return true;
 }
 }  // namespace gas
+
+static std::string slipJson(int amt, uint32_t ts, const char *from, const char *to, const char *ref) {
+  return std::string("{\"ok\":true,\"slip\":{\"amt\":") + std::to_string(amt) + ",\"ts\":" + std::to_string(ts) +
+         ",\"from\":\"" + from + "\",\"from_bank\":\"KBank\",\"to\":\"" + to + "\",\"to_bank\":\"SCB\",\"ref\":\"" +
+         ref + "\",\"memo\":\"\"}}";
+}
+
+// Sends a photo; returns the bot's last message (the draft).
+static std::string photo(int64_t from, const std::string &fileId, const std::string &caption = "") {
+  inbox.clear();
+  tg::Update u;
+  u.chatId = u.fromId = from;
+  u.isPrivate = true;
+  u.photoId = fileId.c_str();
+  u.caption = caption.c_str();
+  bot::handle(u);
+  std::string r = inbox[from].empty() ? "" : inbox[from].back();
+  std::cout << "\n[" << from << "] 📷 " << fileId << " " << caption << "\n" << r << "\n";
+  return r;
+}
+
+// Presses an inline button by its callback_data.
+static std::string press(int64_t from, const std::string &data) {
+  inbox.clear();
+  tg::Update u;
+  u.chatId = u.fromId = from;
+  u.isPrivate = true;
+  u.cbId = "cb";
+  u.cbData = data.c_str();
+  u.cbMsgId = 1;
+  bot::handle(u);
+  std::string r = inbox[from].empty() ? "" : inbox[from].back();
+  std::cout << "\n[" << from << "] 🔘 " << data << "\n" << r << "\n";
+  return r;
+}
+
+// callback_data of the button whose label contains `label` in the last keyboard.
+static std::string button(int64_t chat, const std::string &label) {
+  JsonDocument kb;
+  deserializeJson(kb, lastKeyboard[chat]);
+  for (JsonArray row : kb.as<JsonArray>())
+    for (JsonObject b : row)
+      if (b["text"].as<std::string>().find(label) != std::string::npos) return b["callback_data"].as<std::string>();
+  return "";
+}
 
 static size_t rowsIn(const std::string &url) {
   size_t n = 0;
@@ -331,6 +394,103 @@ int main() {
   expect(say(ME, "/backup"), "ร้าน → ชีตของ me", "falls back to my sheet");
   (void)myMe;
   (void)fanMe;
+
+  // ---------------- Slips (step 5) ----------------
+  // name matching
+  check(slip::nameMatch("นาย สมชาย ใ***", "สมชาย ใจดี"), "masked Thai surname");
+  check(slip::nameMatch("MR. SOMCHAI J", "Somchai Jaidee"), "masked English surname");
+  check(slip::nameMatch("ร้านป้าแดง สาขา 2", "ร้านป้าแดง"), "shop name contained");
+  check(!slip::nameMatch("นาย สมศักดิ์ ดี", "สมชาย ใจดี"), "different first name");
+  check(!slip::nameMatch("", "สมชาย"), "empty slip name");
+
+  r = photo(ME, "f1");
+  expect(r, "ยังไม่ได้ตั้ง", "no slip reader -> message");
+  say(ME, "/backup off");  // my own sheet has no Typhoon key below anyway
+
+  const std::string URL_SLIP = "https://script.google.com/macros/s/SLIP/exec";
+  sheets[URL_SLIP].secret = "s-slip";
+  time_t now = time(nullptr);
+  uint32_t paidAt = now - 3600;
+  sheets[URL_SLIP].slips["pay1"] = slipJson(35000, paidAt, "นาย สมชาย ใ***", "แม็คโคร สาขา 1", "REF001");
+  sheets[URL_SLIP].slips["in1"] = slipJson(120000, now - 60, "นาง สมศรี ม***", "MR. SOMCHAI J", "REF002");
+  sheets[URL_SLIP].slips["who"] = slipJson(5000, now - 60, "นาย ก ข", "นาย ค ง", "REF003");
+  sheets[URL_SLIP].slips["old"] = slipJson(1000, 1000000000, "a", "b", "");  // 2001: time ignored
+  slip::begin(URL_SLIP.c_str(), "s-slip");
+
+  r = photo(ME, "pay1");
+  expect(r, "❓ไม่แน่ใจ", "no /myname yet -> unsure");
+  expect(r, "/myname", "hint to set /myname");
+  press(ME, button(ME, "ยกเลิก"));
+  expect(say(ME, "/myname สมชาย ใจดี"), "สมชาย ใจดี", "add my Thai name");
+  say(ME, "/myname Somchai Jaidee");
+
+  r = photo(ME, "pay1");
+  expect(r, "-350.00", "expense from my name");
+  expectNot(r, "❓", "direction known");
+  expect(r, "โอนให้ แม็คโคร", "note from receiver");
+  expect(r, "📂 วัตถุดิบ", "auto category from receiver (แม็คโคร)");
+  expect(r, "เลขอ้างอิง: REF001", "ref shown");
+  std::string ok = button(ME, "บันทึก");
+  r = press(FAN, ok);
+  expect(r, "หมดเวลา", "fan cannot press my draft");
+  inbox.clear();
+  r = press(ME, ok);
+  expect(r, "✅ -350.00", "saved");
+  if (inbox[FAN].empty()) { std::cout << "  ❌ FAIL: fan not notified about slip\n"; failures++; }
+  Tx paid;
+  check(store::findRef(*shop, "REF001", paid) && paid.ts == paidAt && paid.amt == -35000, "tx has slip time, ref, amount");
+  r = press(ME, ok);
+  expect(r, "หมดเวลา", "draft gone after save (no double save)");
+
+  r = photo(ME, "pay1");
+  expect(r, "สลิปนี้บันทึกไปแล้ว #" + std::to_string(paid.id), "duplicate warning");
+  press(ME, button(ME, "ยกเลิก"));
+
+  r = photo(ME, "in1");
+  expect(r, "+1,200.00", "income to my English name");
+  expect(r, "รับจาก นาง สมศรี", "income note");
+  press(ME, button(ME, "บันทึก"));
+
+  r = photo(ME, "who");
+  expect(r, "-50.00", "unknown direction defaults to expense");
+  r = press(ME, button(ME, "รับ/จ่าย"));
+  expect(r, "+50.00", "flip to income");
+  expectNot(r, "❓", "flip makes it sure");
+  r = press(ME, button(ME, "ส่วนตัว me"));
+  expect(r, "📁 ส่วนตัว me", "moved to my private account");
+  r = press(ME, button(ME, "บันทึก"));
+  Tx who;
+  check(store::findRef(*store::resolve(ME, "me"), "REF003", who) && who.amt == 5000, "saved in private as income");
+  check(!store::findRef(*shop, "REF003", who), "not in shop");
+
+  r = photo(ME, "pay1", "#me @อาหาร ข้าวกลางวัน");
+  expect(r, "📁 ส่วนตัว me", "caption #me");
+  expect(r, "📂 อาหาร", "caption @cat");
+  expect(r, "📝 ข้าวกลางวัน", "caption note");
+  expectNot(r, "บันทึกไปแล้ว", "dup check is per account");
+  press(ME, button(ME, "ยกเลิก"));
+
+  r = photo(ME, "old");
+  expect(r, "ใช้เวลาตอนนี้", "implausible slip date -> now");
+  press(ME, button(ME, "ยกเลิก"));
+
+  expect(photo(ME, "cat-picture"), "ไม่ใช่สลิป", "not a slip");
+  expect(press(ME, "s9999:ok"), "หมดเวลา", "unknown draft");
+
+  // A user's own sheet script is used first; "not set" falls back to the shared one.
+  int sharedBefore = sheets[URL_SLIP].slipCalls;
+  say(FAN, "/backup " + URL_FAN + " s-fan");
+  r = photo(FAN, "pay1");
+  check(sheets[URL_FAN].slipCalls == 1 && sheets[URL_SLIP].slipCalls == sharedBefore + 1, "fan: own script tried, then shared");
+  press(FAN, button(FAN, "ยกเลิก"));
+  sheets[URL_FAN].slips["pay1"] = slipJson(777, now, "x", "y", "R9");
+  photo(FAN, "pay1");
+  check(sheets[URL_SLIP].slipCalls == sharedBefore + 1, "fan's own Typhoon key used, shared not called");
+
+  // Backup carries the ref
+  say(ME, "/backup shop " + URL_SHOP + " s-shop");
+  backup::now(rep);
+  check(sheets[URL_SHOP].tabs["ร้าน (shop)"].count(paid.id) == 1, "slip tx reached the sheet");
 
   std::cout << "\n" << (failures ? "❌ " : "✅ ") << failures << " failure(s)\n";
   return failures != 0;

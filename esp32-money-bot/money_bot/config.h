@@ -19,3 +19,7 @@
 #define BACKUP_IDLE_MS      (60UL * 1000)     // check the queue this often
 #define BACKUP_RETRY_MS     (60UL * 1000)     // first retry after a failure, doubles...
 #define BACKUP_RETRY_MAX_MS (30UL * 60 * 1000)  // ...up to this
+
+#define SLIP_TIMEOUT_MS     60000             // download + OCR + extraction in Apps Script
+#define SLIP_DRAFT_MS       (60UL * 60 * 1000)  // unconfirmed slip drafts expire after this
+#define SLIP_MAX_DRAFTS     10

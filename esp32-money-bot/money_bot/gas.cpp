@@ -5,7 +5,7 @@
 
 namespace gas {
 
-bool post(const String &url, const String &body, String &resp) {
+bool post(const String &url, const String &body, String &resp, uint16_t timeoutMs) {
   // Own TLS client, closed after each call: Google is called rarely, and
   // keeping it open would hold ~40KB of RAM next to the Telegram one.
   WiFiClientSecure client;
@@ -16,7 +16,7 @@ bool post(const String &url, const String &body, String &resp) {
 #endif
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(GAS_TIMEOUT_MS);
+  http.setTimeout(timeoutMs);
   if (!http.begin(client, url)) return false;
   http.addHeader("Content-Type", "application/json");
   int code = http.POST(body);

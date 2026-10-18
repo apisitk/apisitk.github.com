@@ -35,6 +35,10 @@ class String {
   int lastIndexOf(char c) const { auto p = s.rfind(c); return p == std::string::npos ? -1 : (int)p; }
   bool startsWith(const String &p) const { return s.compare(0, p.s.size(), p.s) == 0; }
   bool endsWith(const String &p) const { return s.size() >= p.s.size() && s.compare(s.size() - p.s.size(), p.s.size(), p.s) == 0; }
+  void trim() {
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
+  }
   void toLowerCase() { for (char &c : s) c = tolower((unsigned char)c); }
   bool equalsIgnoreCase(const String &o) const { return strcasecmp(s.c_str(), o.s.c_str()) == 0; }
   bool concat(const char *c) { s += c; return true; }

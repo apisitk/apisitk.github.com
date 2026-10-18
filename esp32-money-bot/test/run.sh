@@ -4,5 +4,5 @@ set -e
 cd "$(dirname "$0")"
 : "${ARDUINOJSON:=$HOME/Arduino/libraries/ArduinoJson/src}"
 g++ -std=c++17 -Wall -Wno-unused-function -Ishim -I"$ARDUINOJSON" -I../money_bot \
-  host_test.cpp ../money_bot/bot.cpp ../money_bot/store.cpp ../money_bot/backup.cpp -o /tmp/money_bot_test
+  host_test.cpp ../money_bot/bot.cpp ../money_bot/store.cpp ../money_bot/backup.cpp ../money_bot/slip.cpp -o /tmp/money_bot_test
 /tmp/money_bot_test
